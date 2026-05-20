@@ -6,7 +6,7 @@ and rearrange panels.
 
 Usage::
 
-    from themachinethatgoesping.pingprocessing.widgets.mapviewer_qt import MapViewerQt
+    from themachinethatgoesping.widgets.mapviewer_qt import MapViewerQt
     viewer = MapViewerQt(builder)
     viewer.show()
     viewer.run()   # blocks in QApplication.exec()

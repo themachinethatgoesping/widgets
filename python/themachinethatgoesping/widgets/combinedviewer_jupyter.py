@@ -5,7 +5,7 @@ Thin wrapper that hosts existing viewer instances (created with
 
 Usage::
 
-    from themachinethatgoesping.pingprocessing.widgets import (
+    from themachinethatgoesping.widgets import (
         CombinedViewerJupyter, WCIViewerJupyter, EchogramViewerJupyter,
         MapViewerJupyter,
     )

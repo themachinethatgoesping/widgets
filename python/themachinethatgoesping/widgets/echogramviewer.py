@@ -112,7 +112,7 @@ class EchogramViewer:
 
         # progressbar
         if progress is None:
-            self.progress = theping.pingprocessing.widgets.TqdmWidget()
+            self.progress = theping.widgets.TqdmWidget()
             self.display_progress = True
         else:
             self.progress = progress

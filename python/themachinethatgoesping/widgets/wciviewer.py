@@ -11,7 +11,7 @@ from themachinethatgoesping import echosounders
 import themachinethatgoesping.pingprocessing.watercolumn.image as mi
 import themachinethatgoesping.pingprocessing.watercolumn.helper.make_image_helper as mi_hlp
 
-from themachinethatgoesping.pingprocessing.widgets import TqdmWidget
+from themachinethatgoesping.widgets import TqdmWidget
 
 WCI_VALUE_CHOICES = [
     "sv/av/pv/rv",

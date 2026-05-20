@@ -18,7 +18,7 @@ import pyqtgraph as pg
 from IPython.display import display
 from pyqtgraph.jupyter import GraphicsLayoutWidget
 
-from themachinethatgoesping.pingprocessing.widgets import TqdmWidget
+from themachinethatgoesping.widgets import TqdmWidget
 
 from . import pyqtgraph_helpers as pgh
 from .control_spec import (

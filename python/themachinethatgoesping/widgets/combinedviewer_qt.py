@@ -9,7 +9,7 @@ be floated to a second monitor.
 
 Usage::
 
-    from themachinethatgoesping.pingprocessing.widgets import (
+    from themachinethatgoesping.widgets import (
         CombinedViewerQt, WCIViewerQt, EchogramViewerQt, MapViewerQt,
     )
 

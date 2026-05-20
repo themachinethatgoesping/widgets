@@ -6,12 +6,12 @@ user can drag, float, and rearrange panels.
 
 Usage (standalone)::
 
-    python -m themachinethatgoesping.pingprocessing.widgets.wciviewer_qt \\
+    python -m themachinethatgoesping.widgets.wciviewer_qt \\
         --help
 
 Or programmatically::
 
-    from themachinethatgoesping.pingprocessing.widgets.wciviewer_qt import WCIViewerQt
+    from themachinethatgoesping.widgets.wciviewer_qt import WCIViewerQt
     viewer = WCIViewerQt(channels)
     viewer.show()
     viewer.run()   # blocks in QApplication.exec()

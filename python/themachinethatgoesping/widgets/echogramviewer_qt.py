@@ -6,7 +6,7 @@ drag, float, and rearrange panels.
 
 Usage::
 
-    from themachinethatgoesping.pingprocessing.widgets.echogramviewer_qt import EchogramViewerQt
+    from themachinethatgoesping.widgets.echogramviewer_qt import EchogramViewerQt
     viewer = EchogramViewerQt(echogramdata)
     viewer.show()
     viewer.run()   # blocks in QApplication.exec()
