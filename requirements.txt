@@ -1,0 +1,11 @@
+numpy >= 1.26.0
+tqdm
+matplotlib
+rasterio >= 1.3.10
+ipywidgets
+pytimeparse2 >= 1.7.1
+pandas
+scipy
+pyqtgraph
+jupyter-rfb
+pyside6

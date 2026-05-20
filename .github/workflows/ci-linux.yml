@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2022 - 2023 Peter Urban, Ghent University
+#
+# SPDX-License-Identifier: CC0-1.0
+
+name: linux
+
+on:
+  push:
+    branches: [ main ]
+    
+    paths-ignore:
+      - '.github/workflows/python-package*'
+      - '.github/workflows/cibuildwheels*'
+      - '.github/workflows/rattler*'
+      - '.github/workflows/test_*'
+      - '.github/workflows/ci-mac*'
+      - '.github/workflows/ci-win*'
+      - 'conda.recipe/*'
+      - '*.md'
+      - 'doc/*'
+    #paths:
+    #  - "**meson.build"
+    #  - "**.cpp"
+    #  - "**.c"
+    #  - "**.h"
+  pull_request:
+    branches: [ main ]
+    
+    paths-ignore:
+      - '.github/workflows/python-package*'
+      - '.github/workflows/cibuildwheels*'
+      - '.github/workflows/rattler*'
+      - '.github/workflows/test_*'
+      - '.github/workflows/ci-mac*'
+      - '.github/workflows/ci-win*'
+      - 'conda.recipe/*'
+      - '*.md'
+      - 'doc/*'
+    #paths:
+    #  - "**meson.build"
+    #  - "**.cpp"
+    #  - "**.c"
+    #  - "**.h"
+
+
+# make sure that multiple jobs don't run for the same action (new commits cancel old jobs when they are still running)
+# Souce Ralf Gommers (commit to meson-python)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  #BUILD_TYPE: Release
+  
+jobs:
+  linux:
+    name: ci on ${{matrix.name}}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:  
+          - { name: 'ubuntu-dep',
+              container: 'ghcr.io/themachinethatgoesping/ubuntu-dep:latest',
+              ccache: 'true',
+              #dep : 'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libdbus-1-3 libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0',
+              pip2: 'pip install -r requirements.txt --break-system-packages' }
+          - { name: 'ubuntu-24.04',
+              runs-on: 'ubuntu-24.04',
+              ccache: 'true',
+              dep : 'sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ccache pkg-config cmake python3-pip libboost-all-dev libcurl4-openssl-dev libgl1 libglib2.0-0 ninja-build libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0', 
+              pip : 'sudo pip install meson meson-python --break-system-packages && pip install pytest numpy --break-system-packages',
+              pip2: 'pip install -r requirements.txt --break-system-packages' }
+          - { name: 'archlinux',
+              container: 'archlinux', 
+              pre-dep : 'pacman -Syu --noconfirm; pacman -Syy sudo git git-lfs --noconfirm', 
+              dep : 'sudo pacman -Syy --noconfirm base-devel ccache pkg-config cmake python-pip boost boost-libs curl mesa glib2 fontconfig libxkbcommon', 
+              pip : 'pip install meson meson-python ninja pytest numpy --break-system-packages',
+              pip2: 'pip install -r requirements.txt --break-system-packages --pre' }
+    
+    runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
+    container: ${{ matrix.container || '' }}
+
+    steps:
+    - name: install perquisites
+      if:  ${{matrix.pre-dep}}
+      run: ${{matrix.pre-dep}}
+
+    - name: checkout main repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        lfs: false
+    
+    - name: ccache
+      if: ${{ matrix.ccache }}
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: super-ci-${{ matrix.container }}  # name for the cache
+
+    - name: install dependencies (c++)
+      if:  ${{matrix.dep}}
+      run: ${{matrix.dep}}
+      
+    - name: install dependencies (meson & python)
+      if:  ${{matrix.pip}}
+      run: ${{matrix.pip}}
+
+    - name: activate gcc-14 toolchain
+      if: ${{ matrix.name == 'ubuntu-24.04' }}
+      run: |
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-14 g++-14
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 140
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 140
+
+    - name: configure meson
+      run: meson setup builddir -Dunity=on -Dunity_size=9999999 -Dpython.install_env=auto -Dprefix=/usr/ --default-library=static;
+
+    - name: compile project
+      run: meson compile -C builddir/
+
+    - name: test (cpp)
+      run: meson test -C builddir/ --print-errorlogs
+
+    - name: install project
+      run: ${{ matrix.container && 'meson install -C builddir/' || 'sudo meson install -C builddir/' }}
+
+    - name: install pip requirements
+      if:  ${{matrix.pip2}}
+      run: ${{matrix.pip2}}
+
+    - name: test (pytest)
+      run: pytest -v
+      
+    - name: 'Upload error log'
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: ${{matrix.name}}_testlog
+        path: builddir/meson-logs/meson-log.txt
+        retention-days: 5
+    
