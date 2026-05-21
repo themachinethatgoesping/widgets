@@ -17,6 +17,8 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 
+from themachinethatgoesping import pingprocessing
+
 from .control_spec import ControlPanel, MAP_COLORMAPS
 from . import pyqtgraph_helpers as pgh
 
@@ -503,7 +505,7 @@ class MapCore:
             warnings.warn(f"Failed to change tile source to {source_name}: {e}")
 
     def list_tile_sources(self) -> List[str]:
-        from ..overview.map_builder.tile_builder import TILE_SOURCES
+        from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
         return list(TILE_SOURCES.keys())
 
     # =====================================================================
@@ -538,7 +540,7 @@ class MapCore:
         if hasattr(bounds, 'xmin'):
             bbox = bounds
         else:
-            from ..overview.map_builder.coordinate_system import BoundingBox
+            from themachinethatgoesping.pingprocessing.overview.map_builder.coordinate_system import BoundingBox
             bbox = BoundingBox(
                 xmin=bounds[0], ymin=bounds[1],
                 xmax=bounds[2], ymax=bounds[3],
@@ -696,7 +698,7 @@ class MapCore:
     # =====================================================================
 
     def add_geotiff(self, path: str, name: Optional[str] = None, band: int = 1, **kwargs) -> None:
-        from ..overview.map_builder import MapBuilder
+        from themachinethatgoesping.pingprocessing.overview.map_builder import MapBuilder
 
         if self._builder is None:
             self._builder = MapBuilder()
@@ -711,7 +713,7 @@ class MapCore:
 
     def add_layer(self, backend: Any, name: Optional[str] = None,
                   visible: bool = True, z_order: Optional[int] = None) -> None:
-        from ..overview.map_builder import MapBuilder
+        from themachinethatgoesping.pingprocessing.overview.map_builder import MapBuilder
 
         if self._builder is None:
             self._builder = MapBuilder()
@@ -1262,7 +1264,7 @@ class MapCore:
         if not self._tracks and not self._overview_tracks:
             return
 
-        from ..overview.map_builder.coordinate_system import BoundingBox
+        from themachinethatgoesping.pingprocessing.overview.map_builder.coordinate_system import BoundingBox
 
         bboxes = []
         for track_info in self._tracks.values():
@@ -1313,7 +1315,7 @@ class MapCore:
             self._schedule_update()
 
     def zoom_to_position(self, lat: float, lon: float, radius_deg: float = 0.01) -> None:
-        from ..overview.map_builder.coordinate_system import BoundingBox
+        from themachinethatgoesping.pingprocessing.overview.map_builder.coordinate_system import BoundingBox
 
         bounds = BoundingBox(
             xmin=lon - radius_deg, ymin=lat - radius_deg,
@@ -1721,7 +1723,7 @@ class MapCore:
         vb = self._plot.vb
         view_range = vb.viewRange()
 
-        from ..overview.map_builder.coordinate_system import BoundingBox
+        from themachinethatgoesping.pingprocessing.overview.map_builder.coordinate_system import BoundingBox
 
         self._current_bounds = BoundingBox(
             xmin=view_range[0][0], xmax=view_range[0][1],
