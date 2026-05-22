@@ -358,7 +358,7 @@ class MapViewerQt(QtWidgets.QMainWindow):
         """Create layer and tile control widgets (stored as instance attrs)."""
         if tile_builder is not None:
             try:
-                from ..overview.map_builder.tile_builder import TILE_SOURCES
+                from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
             except Exception:
                 TILE_SOURCES = {}
 

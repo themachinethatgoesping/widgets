@@ -220,7 +220,7 @@ class MapViewerJupyter:
         if self.core._tile_builder is None:
             return
 
-        from ..overview.map_builder.tile_builder import TILE_SOURCES
+        from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
 
         self._tile_visibility_checkbox = ipywidgets.Checkbox(
             value=self.core.tile_visible,
