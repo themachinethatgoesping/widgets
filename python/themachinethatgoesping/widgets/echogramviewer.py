@@ -588,7 +588,11 @@ class EchogramViewer:
                 x_kwargs['max_timestamp'] = xmax
                 echogram.set_x_axis_ping_time(**x_kwargs)
             case _:
-                raise RuntimeError(f"ERROR: unknown x axis name '{self.x_axis_name}'")
+                # Custom axes (e.g. "Distance") carry their per-ping
+                # coordinates in x_kwargs; just re-grid to the new window.
+                x_kwargs['min_value'] = xmin
+                x_kwargs['max_value'] = xmax
+                echogram.set_x_axis_custom(**x_kwargs)
         
         match self.y_axis_name:
             case 'Depth (m)':

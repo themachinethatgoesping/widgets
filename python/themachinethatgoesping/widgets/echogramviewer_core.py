@@ -652,7 +652,17 @@ class EchogramCore:
             title = str(slot.echogram_key) if slot.echogram_key is not None else f"Slot {i+1}"
             plot.setTitle(title)
             plot.setLabel("left", self.y_axis_name if col == 0 else "")
-            plot.setLabel("bottom", self.x_axis_name if row == self.grid_rows - 1 else "")
+            is_bottom_row = row == self.grid_rows - 1
+            if self._x_axis_format == "distance":
+                # Use pyqtgraph's SI prefix so the axis adapts between m and km
+                # (and mm/µm when zoomed in) depending on the visible range.
+                bottom_axis = plot.getAxis("bottom")
+                bottom_axis.enableAutoSIPrefix(True)
+                bottom_axis.setLabel("Distance", units="m")
+                if not is_bottom_row:
+                    bottom_axis.showLabel(False)
+            else:
+                plot.setLabel("bottom", self.x_axis_name if is_bottom_row else "")
             plot.getViewBox().invertY(True)
             plot.getViewBox().setBackgroundColor("w")
 
@@ -1253,6 +1263,22 @@ class EchogramCore:
         """Parse an interval string and return the width in x-axis units."""
         import re
         text = text.strip()
+
+        # Distance axis: accept km / m / cm (or a plain number in meters)
+        if self._x_axis_format == "distance":
+            m = re.match(r'^([0-9]*\.?[0-9]+)\s*(km|m|cm)$', text, re.IGNORECASE)
+            if m:
+                value = float(m.group(1))
+                unit = m.group(2).lower()
+                if unit == 'km':
+                    return value * 1000.0
+                if unit == 'cm':
+                    return value / 100.0
+                return value
+            try:
+                return float(text)
+            except ValueError:
+                return None
 
         # Try "<number> <unit>" patterns
         m = re.match(r'^([0-9]*\.?[0-9]+)\s*(h|hr|hours?|min|minutes?|m|s|sec|seconds?)$',
@@ -2576,6 +2602,51 @@ class EchogramCore:
             return 0
         return self.pingviewer.w_index.value
 
+    def _active_time_gap_cs(self):
+        """Return the master coord system when time-gap compression is active.
+
+        Only returns a coord system for time axes whose displayed timeline has
+        been gap-compressed (``set_x_axis_ping_time(max_gap=...)``); otherwise
+        ``None`` so the normal (real-timestamp) fast paths are used unchanged.
+        """
+        if self.x_axis_name not in ("Ping time", "Date time"):
+            return None
+        eg = next(iter(self.echograms.values()), None)
+        if eg is not None and hasattr(eg, "_coord_system"):
+            cs = eg._coord_system
+            if getattr(cs, "_time_gap", None) is not None:
+                return cs
+        return None
+
+    def _display_time_to_real(self, compressed_ts: float) -> float:
+        """Map a displayed (gap-compressed) timestamp back to a real one."""
+        cs = self._active_time_gap_cs()
+        if cs is None:
+            return compressed_ts
+        try:
+            idx = int(cs.feature_mapper.feature_to_index(
+                cs.x_axis_name, float(compressed_ts)))
+            idx = max(0, min(idx, len(cs.ping_times) - 1))
+            return float(cs.ping_times[idx])
+        except Exception:
+            return compressed_ts
+
+    def _real_time_to_display(self, real_ts: float) -> float:
+        """Map a real timestamp to its displayed (gap-compressed) coordinate."""
+        cs = self._active_time_gap_cs()
+        if cs is None:
+            return real_ts
+        try:
+            comp = np.asarray(
+                cs.feature_mapper.get_feature_values(cs.x_axis_name),
+                dtype=np.float64)
+            real = np.asarray(cs.ping_times, dtype=np.float64)
+            idx = int(np.searchsorted(real, float(real_ts)))
+            idx = max(0, min(idx, len(comp) - 1))
+            return float(comp[idx])
+        except Exception:
+            return real_ts
+
     def _coord_to_ping_index(self, coord: float) -> Optional[int]:
         """Convert an x-axis coordinate to a ping index (O(log n))."""
         pings = self._get_pingviewer_pings()
@@ -2589,13 +2660,15 @@ class EchogramCore:
                 if self._ping_timestamps is None:
                     return None
                 target = self._mpl_num_to_datetime(coord).timestamp()
+                target = self._display_time_to_real(target)
                 idx = int(np.searchsorted(self._ping_timestamps, target,
                                           side='right')) - 1
                 return max(0, min(idx, n - 1))
             case "Ping time":
                 if self._ping_timestamps is None:
                     return None
-                idx = int(np.searchsorted(self._ping_timestamps, coord,
+                target = self._display_time_to_real(coord)
+                idx = int(np.searchsorted(self._ping_timestamps, target,
                                           side='right')) - 1
                 return max(0, min(idx, n - 1))
             case _:
@@ -2649,9 +2722,10 @@ class EchogramCore:
                 case "Ping number" | "Ping index":
                     value = float(idx)
                 case "Date time":
-                    value = self._datetime_to_mpl_num(ping.get_datetime())
+                    value = self._real_time_to_display(
+                        ping.get_timestamp()) / 86400.0
                 case "Ping time":
-                    value = ping.get_timestamp()
+                    value = self._real_time_to_display(ping.get_timestamp())
                 case _:
                     return
             self._cached_pingline_index = idx
@@ -2763,9 +2837,10 @@ class EchogramCore:
             case "Ping number" | "Ping index":
                 pingline_x = float(self._get_pingviewer_current_index())
             case "Date time":
-                pingline_x = self._datetime_to_mpl_num(ping.get_datetime())
+                pingline_x = self._real_time_to_display(
+                    ping.get_timestamp()) / 86400.0
             case "Ping time":
-                pingline_x = ping.get_timestamp()
+                pingline_x = self._real_time_to_display(ping.get_timestamp())
             case _:
                 return
         master = self._get_master_plot()
@@ -2911,17 +2986,17 @@ class EchogramCore:
     def _time_to_x_coord(self, time_value) -> Optional[float]:
         if isinstance(time_value, datetime):
             if self.x_axis_name == "Date time":
-                return self._datetime_to_mpl_num(time_value)
+                return self._real_time_to_display(
+                    time_value.timestamp()) / 86400.0
             elif self.x_axis_name == "Ping time":
-                return time_value.timestamp()
+                return self._real_time_to_display(time_value.timestamp())
             else:
                 return self._timestamp_to_x_coord(time_value.timestamp())
         elif isinstance(time_value, (int, float)):
             if self.x_axis_name == "Date time":
-                dt = datetime.fromtimestamp(time_value, tz=timezone.utc)
-                return self._datetime_to_mpl_num(dt)
+                return self._real_time_to_display(float(time_value)) / 86400.0
             elif self.x_axis_name == "Ping time":
-                return float(time_value)
+                return self._real_time_to_display(float(time_value))
             else:
                 return self._timestamp_to_x_coord(time_value)
         return None
@@ -3073,6 +3148,16 @@ class EchogramCore:
         dt_value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         return (dt_value - base).total_seconds() / 86400.0
 
+    @staticmethod
+    def _format_distance(meters: float) -> str:
+        """Human-readable distance label (m / km / cm) for hover text."""
+        m = abs(float(meters))
+        if m >= 1000.0:
+            return f"{meters / 1000.0:0.3f} km"
+        if m >= 1.0:
+            return f"{meters:0.1f} m"
+        return f"{meters * 100.0:0.1f} cm"
+
     def _format_x_value(self, coord: float) -> str:
         match self.x_axis_name:
             case "Date time":
@@ -3085,6 +3170,8 @@ class EchogramCore:
                 if self._x_axis_format == "timedelta":
                     return pgh.TimedeltaAxis._format_seconds(
                         coord, self._x_axis_max_seconds)
+                if self._x_axis_format == "distance":
+                    return self._format_distance(coord)
                 return f"{coord:0.2f}"
 
     def _numeric_extent(self, extent):
