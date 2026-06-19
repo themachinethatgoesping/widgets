@@ -37,6 +37,50 @@ def _get_axis_names(echogram):
     return echogram.x_axis_name, echogram.y_axis_name
 
 
+def timestamp_to_axis_coordinate(cs, x_axis_name, timestamp):
+    """Map a real Unix timestamp to a non-time x-axis coordinate.
+
+    Handles the ping-index/number axis (via a binary search on the per-ping
+    times) and custom axes such as ``"Distance"`` (by interpolating the
+    timestamp against the per-ping custom coordinates). Time axes
+    (``"Date time"`` / ``"Ping time"``) are handled by the caller because they
+    may apply gap-compression.
+
+    Args:
+        cs: An ``EchogramCoordinateSystem`` (must expose ``ping_times``;
+            optionally ``ping_numbers``, ``_custom_x_per_ping`` and
+            ``_custom_x_axis_name``).
+        x_axis_name: The current x-axis name.
+        timestamp: Real Unix timestamp in seconds.
+
+    Returns:
+        The x-axis coordinate (float) or ``None`` when it cannot be resolved.
+    """
+    if cs is None:
+        return None
+    ping_times = np.asarray(getattr(cs, "ping_times", []), dtype=np.float64)
+    if ping_times.size == 0:
+        return None
+
+    if x_axis_name in ("Ping index", "Ping number"):
+        idx = int(np.searchsorted(ping_times, float(timestamp)))
+        idx = max(0, min(idx, ping_times.size - 1))
+        ping_numbers = getattr(cs, "ping_numbers", None)
+        if ping_numbers is not None:
+            ping_numbers = np.asarray(ping_numbers)
+            if ping_numbers.size == ping_times.size:
+                return float(ping_numbers[idx])
+        return float(idx)
+
+    # Custom axis (e.g. "Distance"): interpolate timestamp -> custom coordinate.
+    custom_pp = getattr(cs, "_custom_x_per_ping", None)
+    if custom_pp is not None and getattr(cs, "_custom_x_axis_name", None) == x_axis_name:
+        custom_x = np.asarray(custom_pp, dtype=np.float64)
+        if custom_x.size == ping_times.size:
+            return float(np.interp(float(timestamp), ping_times, custom_x))
+    return None
+
+
 def normalise_echograms(
     echogramdata: Union[Dict[str, Any], Sequence[Any], Any],
     names: Optional[Sequence[Optional[str]]],
@@ -636,6 +680,7 @@ class EchogramCore:
             row = i // self.grid_cols
             col = i % self.grid_cols
             slot = self.slots[i]
+            is_bottom_row = row == self.grid_rows - 1
 
             axis_items = None
             if self._x_axis_is_datetime:
@@ -644,6 +689,11 @@ class EchogramCore:
             elif self._x_axis_format == "timedelta":
                 axis_items = {"bottom": pgh.TimedeltaAxis(
                     max_seconds=self._x_axis_max_seconds, orientation="bottom")}
+            elif self._x_axis_format == "distance":
+                # Adapts between meters and kilometers based on the zoom span
+                # (meters once the visible range drops below 5 km).
+                axis_items = {"bottom": pgh.DistanceAxis(
+                    show_unit_label=is_bottom_row, orientation="bottom")}
 
             plot: pg.PlotItem = self.graphics.addPlot(
                 row=row, col=col * 2, axisItems=axis_items)
@@ -652,15 +702,11 @@ class EchogramCore:
             title = str(slot.echogram_key) if slot.echogram_key is not None else f"Slot {i+1}"
             plot.setTitle(title)
             plot.setLabel("left", self.y_axis_name if col == 0 else "")
-            is_bottom_row = row == self.grid_rows - 1
             if self._x_axis_format == "distance":
-                # Use pyqtgraph's SI prefix so the axis adapts between m and km
-                # (and mm/µm when zoomed in) depending on the visible range.
-                bottom_axis = plot.getAxis("bottom")
-                bottom_axis.enableAutoSIPrefix(True)
-                bottom_axis.setLabel("Distance", units="m")
+                # DistanceAxis manages its own (zoom-dependent) m/km label;
+                # just hide it on non-bottom rows.
                 if not is_bottom_row:
-                    bottom_axis.showLabel(False)
+                    plot.getAxis("bottom").showLabel(False)
             else:
                 plot.setLabel("bottom", self.x_axis_name if is_bottom_row else "")
             plot.getViewBox().invertY(True)
@@ -2984,35 +3030,38 @@ class EchogramCore:
         self._request_remote_draw()
 
     def _time_to_x_coord(self, time_value) -> Optional[float]:
+        # Normalise the incoming time to a real Unix timestamp (seconds).
         if isinstance(time_value, datetime):
-            if self.x_axis_name == "Date time":
-                return self._real_time_to_display(
-                    time_value.timestamp()) / 86400.0
-            elif self.x_axis_name == "Ping time":
-                return self._real_time_to_display(time_value.timestamp())
-            else:
-                return self._timestamp_to_x_coord(time_value.timestamp())
+            ts = time_value.timestamp()
         elif isinstance(time_value, (int, float)):
-            if self.x_axis_name == "Date time":
-                return self._real_time_to_display(float(time_value)) / 86400.0
-            elif self.x_axis_name == "Ping time":
-                return self._real_time_to_display(float(time_value))
-            else:
-                return self._timestamp_to_x_coord(time_value)
-        return None
+            ts = float(time_value)
+        else:
+            try:
+                ts = float(np.datetime64(time_value, "ns").astype("int64")) / 1e9
+            except Exception:
+                return None
 
-    def _timestamp_to_x_coord(self, timestamp: float) -> Optional[float]:
-        if not self.echograms:
-            return None
-        first_echogram = next(iter(self.echograms.values()))
-        if hasattr(first_echogram, '_coord_system'):
-            cs = first_echogram._coord_system
-            if (cs._custom_x_per_ping is not None
-                    and cs._custom_x_axis_name == cs.x_axis_name):
-                ping_times = np.asarray(cs.ping_times, dtype=np.float64)
-                custom_x = np.asarray(cs._custom_x_per_ping, dtype=np.float64)
-                return float(np.interp(timestamp, ping_times, custom_x))
-        return self._find_ping_index_for_time(timestamp)
+        # Time axes honour gap-compression and are handled directly.
+        if self.x_axis_name == "Date time":
+            return self._real_time_to_display(ts) / 86400.0
+        if self.x_axis_name == "Ping time":
+            return self._real_time_to_display(ts)
+
+        # Ping-index / distance / other custom axes map through the coordinate
+        # system so stations land at the correct ping distance or index.
+        cs = self._get_master_coord_system()
+        coord = timestamp_to_axis_coordinate(cs, self.x_axis_name, ts)
+        if coord is not None:
+            return coord
+        # Fallback for legacy ping-list echograms without a coordinate system.
+        return self._find_ping_index_for_time(ts)
+
+    def _get_master_coord_system(self):
+        """Return the coordinate system of the first echogram, or None."""
+        eg = next(iter(self.echograms.values()), None)
+        if eg is not None and hasattr(eg, "_coord_system"):
+            return eg._coord_system
+        return None
 
     def _find_ping_index_for_time(self, timestamp: float) -> Optional[float]:
         if not self.echograms:
