@@ -1226,6 +1226,9 @@ class EchogramCore:
 
         Uses the per-ping vec_min_y / vec_max_y from the echogrambuilder's
         coordinate system rather than scanning rendered pixels.
+
+        If an echogram defines a main layer, autoscaling is constrained to that
+        layer's visible Y limits for the current X window.
         """
         master = self._get_master_plot()
         if not master:
@@ -1263,8 +1266,55 @@ class EchogramCore:
             if idx_lo >= idx_hi:
                 continue
 
-            slice_min = cs.vec_min_y[idx_lo:idx_hi]
-            slice_max = cs.vec_max_y[idx_lo:idx_hi]
+            # Prefer main-layer bounds when available; otherwise use full
+            # echogram limits.
+            use_main_layer = getattr(eg, 'main_layer', None) is not None
+            slice_min = None
+            slice_max = None
+            if use_main_layer:
+                layer = eg.main_layer
+                i0 = np.asarray(layer.i0[idx_lo:idx_hi], dtype=np.float64)
+                i1 = np.asarray(layer.i1[idx_lo:idx_hi], dtype=np.float64)
+                valid = np.isfinite(i0) & np.isfinite(i1) & (i1 > i0)
+
+                if np.any(valid):
+                    y_axis = cs.y_axis_name
+                    if y_axis == "Y indice":
+                        lo = i0
+                        hi = i1 - 1.0
+                    elif y_axis == "Sample number" and cs._affine_sample_to_sample_nr is not None:
+                        a, b = cs._affine_sample_to_sample_nr
+                        a_sel = np.asarray(a[idx_lo:idx_hi], dtype=np.float64)
+                        b_sel = np.asarray(b[idx_lo:idx_hi], dtype=np.float64)
+                        lo = a_sel + b_sel * i0
+                        hi = a_sel + b_sel * (i1 - 1.0)
+                    elif y_axis == "Depth (m)" and cs._affine_sample_to_depth is not None:
+                        a, b = cs._affine_sample_to_depth
+                        a_sel = np.asarray(a[idx_lo:idx_hi], dtype=np.float64)
+                        b_sel = np.asarray(b[idx_lo:idx_hi], dtype=np.float64)
+                        lo = a_sel + b_sel * i0
+                        hi = a_sel + b_sel * (i1 - 1.0)
+                    elif y_axis == "Range (m)" and cs._affine_sample_to_range is not None:
+                        a, b = cs._affine_sample_to_range
+                        a_sel = np.asarray(a[idx_lo:idx_hi], dtype=np.float64)
+                        b_sel = np.asarray(b[idx_lo:idx_hi], dtype=np.float64)
+                        lo = a_sel + b_sel * i0
+                        hi = a_sel + b_sel * (i1 - 1.0)
+                    else:
+                        lo = hi = None
+
+                    if lo is not None and hi is not None:
+                        lo = np.asarray(lo, dtype=np.float64)
+                        hi = np.asarray(hi, dtype=np.float64)
+                        layer_min = np.minimum(lo, hi)
+                        layer_max = np.maximum(lo, hi)
+                        slice_min = np.where(valid, layer_min, np.nan)
+                        slice_max = np.where(valid, layer_max, np.nan)
+
+            if slice_min is None or slice_max is None:
+                slice_min = cs.vec_min_y[idx_lo:idx_hi]
+                slice_max = cs.vec_max_y[idx_lo:idx_hi]
+
             finite_min = slice_min[np.isfinite(slice_min)]
             finite_max = slice_max[np.isfinite(slice_max)]
             if finite_min.size == 0 or finite_max.size == 0:
