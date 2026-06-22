@@ -339,6 +339,7 @@ class EchogramSlot:
         self.background_levels: Optional[Tuple[float, float]] = None
         self.layer_levels: Optional[Tuple[float, float]] = None
         self.active_colorbar_layer: str = 'background'
+        self._colorbar_default_pending: bool = True
 
         # Image data cache
         self._image_cache: Dict[str, Dict[str, Any]] = {}
@@ -393,6 +394,10 @@ class EchogramSlot:
                 }
 
             self.echogram_key = echogram_key
+            # Reset to default; core will promote this to 'layer' for echograms
+            # that define layers.
+            self.active_colorbar_layer = 'background'
+            self._colorbar_default_pending = True
 
             # Check slot's local cache first
             if echogram_key is not None and echogram_key in self._image_cache:
@@ -521,6 +526,8 @@ class EchogramCore:
         self.grid_rows, self.grid_cols = initial_grid
         self._ignore_range_changes = False
         self._last_view_range = None
+        self._preferred_colorbar_layer: str = 'background'
+        self._suppress_colorbar_preference_update: bool = False
 
         # Crosshair
         self._crosshair_enabled = True
@@ -579,6 +586,14 @@ class EchogramCore:
         self._cancel_load: Callable[[], None] = lambda: None
         self._report_error: Callable[[str], None] = lambda msg: print(msg)
         self._auto_update_enabled: bool = True
+
+        # Initialize remembered colorbar selector preference from UI state.
+        try:
+            initial_layer = str(self.panel["colorbar_layer"].value)
+            if initial_layer:
+                self._preferred_colorbar_layer = initial_layer
+        except Exception:
+            pass
 
         # Build initial graphics
         self.update_grid_layout()
@@ -851,6 +866,8 @@ class EchogramCore:
         self._request_remote_draw()
 
     def on_colorbar_layer_change(self, new_layer: str) -> None:
+        if not self._suppress_colorbar_preference_update:
+            self._preferred_colorbar_layer = str(new_layer)
         for slot in self._get_visible_slots():
             self._switch_colorbar_layer(slot, new_layer)
         self._request_remote_draw()
@@ -930,6 +947,36 @@ class EchogramCore:
 
         slot.needs_update = False
 
+        # Apply default colorbar source once per echogram assignment.
+        # Use the remembered selector preference and fall back only when
+        # the preferred source is unavailable for this echogram.
+        if slot._colorbar_default_pending:
+            has_layer_data = bool(getattr(echogram, 'main_layer', None) is not None)
+            if not has_layer_data:
+                layers = getattr(echogram, 'layers', None)
+                has_layer_data = bool(layers)
+
+            preferred = self._preferred_colorbar_layer
+            if preferred == 'layer' and not has_layer_data:
+                applied = 'background'
+            else:
+                applied = preferred
+
+            self._switch_colorbar_layer(slot, applied)
+
+            # Keep the UI chooser in sync with the applied layer but do not
+            # overwrite the remembered preference on fallback updates.
+            try:
+                if self.panel["colorbar_layer"].value != applied:
+                    self._suppress_colorbar_preference_update = True
+                    self.panel["colorbar_layer"].value = applied
+            except Exception:
+                pass
+            finally:
+                self._suppress_colorbar_preference_update = False
+
+            slot._colorbar_default_pending = False
+
         # Refresh parameter-display overlay for this slot (view-range aware)
         self._update_param_display(slot)
 
@@ -977,18 +1024,17 @@ class EchogramCore:
             slot.active_colorbar_layer = new_layer
             return
         old_layer = slot.active_colorbar_layer
-        if old_layer == new_layer:
-            return
-        current_levels = slot.colorbar.levels()
-        if old_layer == 'background':
-            slot.background_levels = current_levels
-        elif old_layer == 'layer':
-            slot.layer_levels = current_levels
-        # (nothing to stash for 'param' — its levels come from the data)
+        if old_layer != new_layer:
+            current_levels = slot.colorbar.levels()
+            if old_layer == 'background':
+                slot.background_levels = current_levels
+            elif old_layer == 'layer':
+                slot.layer_levels = current_levels
+            # (nothing to stash for 'param' — its levels come from the data)
 
         slot.active_colorbar_layer = new_layer
 
-        if new_layer == 'layer' and slot.layer_image is not None:
+        if new_layer == 'layer':
             layer_img = slot.image_layers.get('layer')
             if layer_img is not None:
                 slot.colorbar.setImageItem(layer_img)
