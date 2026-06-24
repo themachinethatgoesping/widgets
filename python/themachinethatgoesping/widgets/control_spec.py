@@ -137,6 +137,17 @@ class ControlHandle:
     def value(self, v: Any) -> None:
         raise NotImplementedError
 
+    def set_silent(self, v: Any) -> None:
+        """Set :pyattr:`value` **without** triggering change callbacks.
+
+        The default implementation simply assigns the value.  Backends that
+        emit change events on *programmatic* writes (e.g. Qt's
+        ``valueChanged``) override this to suppress the emission so internal
+        synchronisation updates never re-enter the change handlers and cause
+        feedback loops.
+        """
+        self.value = v
+
     def on_change(self, callback: Callable[[Any], None]) -> None:
         """Register a callback for value changes.  *callback* receives the
         new value."""

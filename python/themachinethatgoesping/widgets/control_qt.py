@@ -65,6 +65,32 @@ class QtControlHandle(ControlHandle):
     def value(self, v: Any) -> None:
         self._setter(v)
 
+    def set_silent(self, v: Any) -> None:
+        """Set the value **without** emitting Qt change signals.
+
+        Blocks signals on the inner widget (and any paired spin box) so a
+        programmatic write performed during time-synchronisation cannot
+        re-enter the ping-change handlers through ``valueChanged``.  Qt
+        re-emits ``valueChanged`` synchronously and the ping-slider adapter
+        buffers those events, so suppressing the emission here is what breaks
+        the synchronisation feedback loop.
+        """
+        inner = self._inner
+        paired = getattr(self, "_paired_spin", None)
+        prev_inner = inner.blockSignals(True)
+        prev_paired = paired.blockSignals(True) if paired is not None else None
+        try:
+            self._setter(v)
+            if paired is not None:
+                try:
+                    paired.setValue(int(v))
+                except (TypeError, ValueError):
+                    pass
+        finally:
+            inner.blockSignals(prev_inner)
+            if paired is not None:
+                paired.blockSignals(prev_paired)
+
     def on_change(self, callback: Callable[[Any], None]) -> None:
         if self._change_signal is not None:
             self._change_signal.connect(lambda *a: callback(self.value))

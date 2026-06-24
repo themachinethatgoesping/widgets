@@ -300,6 +300,10 @@ class WCICore:
         self.time_sync_enabled = time_sync_enabled
         self.time_warning_threshold = time_warning_threshold
         self._reference_slot_idx: int = 0
+        # ``_syncing`` is the authoritative "change origin" flag.  While it is
+        # True, any ping change is being propagated to the *other* slots by
+        # internal time-synchronisation and must NOT be treated as a manual /
+        # external action (see ``on_ping_change`` and ``_sync_other_slots``).
         self._syncing = False
         self._reference_timestamp: Optional[float] = None
 
@@ -513,9 +517,12 @@ class WCICore:
                 if ref_ts is not None:
                     closest_idx = slot.find_closest_ping_index(ref_ts)
                     slot.ping_index = closest_idx
+                    # Silent write under the sync-origin guard: a channel swap
+                    # must align this slot to the reference time without
+                    # emitting a user-style ping change.
                     self._syncing = True
                     try:
-                        self.panel[f"ping_slider_{slot_idx}"].value = closest_idx
+                        self.panel[f"ping_slider_{slot_idx}"].set_silent(closest_idx)
                     finally:
                         self._syncing = False
                     closest_ts = slot.get_timestamp(closest_idx)
@@ -538,6 +545,14 @@ class WCICore:
         self._request_remote_draw()
 
     def on_ping_change(self, slot_idx: int, new_ping: int) -> None:
+        """Handle a *manual or external* ping change for ``slot_idx``.
+
+        This slot becomes the synchronisation master: its timestamp becomes the
+        reference and all other slots are aligned to it.  Changes that originate
+        from the internal synchronisation itself are flagged by ``_syncing`` and
+        ignored here so they can never become a competing master (which caused
+        the back-and-forth oscillation between channels).
+        """
         if self._syncing:
             return
         t0 = time_module.time()
@@ -636,7 +651,10 @@ class WCICore:
                 closest_ts = slot.get_timestamp(closest_idx)
                 slot.time_offset = (closest_ts - ref_ts) if closest_ts is not None else 0.0
                 slot.ping_index = closest_idx
-                self.panel[f"ping_slider_{i}"].value = closest_idx
+                # Silent write: this is an internal sync update, it must not
+                # emit a change event (which would make this slot a new master
+                # and bounce the synchronisation back and forth).
+                self.panel[f"ping_slider_{i}"].set_silent(closest_idx)
                 if slot.is_visible:
                     self._update_slot(slot)
                 self._update_time_offset_text(slot)
