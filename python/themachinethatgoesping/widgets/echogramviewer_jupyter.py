@@ -98,6 +98,8 @@ class EchogramViewerJupyter:
         # Per-slot selectors
         echogram_options = [("(none)", None)] + [(n, n) for n in self.echogram_names]
         self._slot_selectors: List[ipywidgets.Dropdown] = []
+        # Per-slot "interactive parameter editing" toggles (one per view).
+        self._slot_interactive_checks: List[ipywidgets.Checkbox] = []
         for i in range(EchogramCore.MAX_SLOTS):
             eg_key = self.echogram_names[i] if i < n_eg else None
             sel = ipywidgets.Dropdown(
@@ -112,6 +114,17 @@ class EchogramViewerJupyter:
             )
             self.panel[f"slot_selector_{i}"] = JupyterControlHandle(sel)
             self._slot_selectors.append(sel)
+
+            chk = ipywidgets.Checkbox(
+                value=True, description="\u270f", indent=False,
+                layout=ipywidgets.Layout(width="60px"),
+            )
+            chk.observe(
+                lambda change, idx=i: self._on_slot_interactive_toggled(
+                    idx, change["new"]),
+                names="value",
+            )
+            self._slot_interactive_checks.append(chk)
 
         # Tab buttons for quick single-view
         self._tab_buttons: List[ipywidgets.Button] = []
@@ -206,12 +219,18 @@ class EchogramViewerJupyter:
         if hasattr(self, "core"):
             self.core.on_slot_change(slot_idx, change["new"])
 
+    def _on_slot_interactive_toggled(self, slot_idx: int, enabled: bool) -> None:
+        if hasattr(self, "core"):
+            self.core.set_slot_interactive(slot_idx, enabled)
+
     def _update_slot_selector_visibility(self) -> None:
         if not hasattr(self, "_slot_selector_box"):
             return
         n_visible = self.core.grid_rows * self.core.grid_cols
         self._slot_selector_box.children = [
-            self._slot_selectors[i] for i in range(n_visible)
+            ipywidgets.HBox([self._slot_selectors[i],
+                             self._slot_interactive_checks[i]])
+            for i in range(n_visible)
         ]
 
     def _report_error(self, msg: str) -> None:
@@ -378,7 +397,9 @@ class EchogramViewerJupyter:
         n_visible = self.core.grid_rows * self.core.grid_cols
 
         slot_box = ipywidgets.HBox(
-            [self._slot_selectors[i] for i in range(n_visible)]
+            [ipywidgets.HBox([self._slot_selectors[i],
+                              self._slot_interactive_checks[i]])
+             for i in range(n_visible)]
         )
         tab_box = ipywidgets.HBox(self._tab_buttons)
 
@@ -420,7 +441,10 @@ class EchogramViewerJupyter:
         n_visible = self.core.grid_rows * self.core.grid_cols
 
         # Slot selectors
-        visible_selectors = [self._slot_selectors[i] for i in range(n_visible)]
+        visible_selectors = [
+            ipywidgets.HBox([self._slot_selectors[i],
+                             self._slot_interactive_checks[i]])
+            for i in range(n_visible)]
         self._slot_selector_box = ipywidgets.HBox(visible_selectors)
 
         # Tab buttons row (quick single-view)

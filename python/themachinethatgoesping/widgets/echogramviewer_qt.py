@@ -100,6 +100,8 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
         # Per-slot selectors
         echogram_options = [("(none)", None)] + [(n, n) for n in self.echogram_names]
         self._slot_selectors: List[QtWidgets.QComboBox] = []
+        # Per-slot "interactive parameter editing" toggles (one per view).
+        self._slot_interactive_checks: List[QtWidgets.QCheckBox] = []
 
         for i in range(EchogramCore.MAX_SLOTS):
             eg_key = self.echogram_names[i] if i < n_eg else None
@@ -121,6 +123,18 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
                 inner=sel,
             )
             self._slot_selectors.append(sel)
+
+            # Interactive-editing toggle for this view.  Default on (every view
+            # is editable).  Connected *after* setChecked so it doesn't fire
+            # before the core exists; the handler is also guarded below.
+            chk = QtWidgets.QCheckBox("\u270f")
+            chk.setChecked(True)
+            chk.setToolTip(
+                "Interactive parameter editing on this view \u2014 "
+                "uncheck to pan/zoom without grabbing points")
+            chk.toggled.connect(
+                lambda checked, idx=i: self._on_slot_interactive_toggled(idx, checked))
+            self._slot_interactive_checks.append(chk)
 
         # -- graphics widget (native) --
         self.graphics = pg.GraphicsLayoutWidget()
@@ -202,10 +216,17 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
         if hasattr(self, "core"):
             self.core.on_slot_change(slot_idx, new_key)
 
+    def _on_slot_interactive_toggled(self, slot_idx: int, enabled: bool) -> None:
+        if hasattr(self, "core"):
+            self.core.set_slot_interactive(slot_idx, enabled)
+
     def _update_slot_selector_visibility(self) -> None:
         n_visible = self.core.grid_rows * self.core.grid_cols
         for i, sel in enumerate(self._slot_selectors):
-            sel.setVisible(i < n_visible)
+            vis = i < n_visible
+            sel.setVisible(vis)
+            if i < len(self._slot_interactive_checks):
+                self._slot_interactive_checks[i].setVisible(vis)
 
     # =====================================================================
     # Keyboard event filter
@@ -341,6 +362,7 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
         for i in range(n_visible):
             row = QtWidgets.QHBoxLayout()
             row.addWidget(self._slot_selectors[i])
+            row.addWidget(self._slot_interactive_checks[i])
             slot_layout.addLayout(row)
 
         # Progress
@@ -448,6 +470,7 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
         for i in range(n_visible):
             row = QtWidgets.QHBoxLayout()
             row.addWidget(self._slot_selectors[i])
+            row.addWidget(self._slot_interactive_checks[i])
             layout.addLayout(row)
 
         # -- Render controls --

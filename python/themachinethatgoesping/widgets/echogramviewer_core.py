@@ -130,48 +130,76 @@ def auto_select_grid(
 # ---------------------------------------------------------------------------
 
 class DraggableScatterPlotItem(pg.ScatterPlotItem):
-    """ScatterPlotItem that supports dragging individual points."""
+    """ScatterPlotItem whose individual points can be dragged.
 
+    This uses pyqtgraph's ``mouseDragEvent`` abstraction — the same mechanism
+    :class:`pyqtgraph.TargetItem` and the ROI classes use — instead of raw Qt
+    mouse events.  That guarantees correct arbitration with the ViewBox:
+
+    * a drag that *starts on a point* moves only that point, while
+    * a drag that starts on empty space is left unaccepted and falls through to
+      the ViewBox, so normal pan / zoom keeps working.
+
+    Crucially this is **one** scene item for *all* points (pyqtgraph batches
+    scatter rendering into a single item), so editing a curve with hundreds of
+    control points no longer creates hundreds of hover-accepting handle /
+    segment items the way :class:`pyqtgraph.PolyLineROI` does — which was the
+    cause of the whole-viewer slowdown.  Hit-testing uses the vectorised
+    :meth:`ScatterPlotItem.pointsAt`, so only the point under the cursor is
+    grabbed regardless of the total number of points ("only points close to the
+    mouse are selectable").
+
+    The original index of every displayed point is carried in the spot ``data``
+    field, so the emitted index stays correct even when the visible points are
+    a downsampled subset of the full parameter array.
+    """
+
+    # original_index, new_x, new_y
     sigPointDragged = QtCore.Signal(int, float, float)
+    sigPointDragFinished = QtCore.Signal()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._dragging_point_idx: Optional[int] = None
-        self._drag_start_pos: Optional[QtCore.QPointF] = None
+        self.movable = True
+        self._drag_index: Optional[int] = None
 
-    def mousePressEvent(self, ev):
-        if ev.button() != QtCore.Qt.MouseButton.LeftButton:
-            ev.ignore()
+    def setMovable(self, movable: bool) -> None:
+        self.movable = bool(movable)
+        if not self.movable:
+            self._drag_index = None
+
+    def mouseDragEvent(self, ev):
+        # Only left-button drags on a movable scatter are handled here; anything
+        # else is left unaccepted so the ViewBox can pan / zoom as usual.
+        if not self.movable or ev.button() != QtCore.Qt.MouseButton.LeftButton:
             return
-        pos = ev.pos()
-        pts = self.pointsAt(pos)
-        if len(pts) > 0:
-            self._dragging_point_idx = pts[0].index()
-            self._drag_start_pos = pos
+
+        if ev.isStart():
+            pts = self.pointsAt(ev.buttonDownPos())
+            if len(pts) == 0:
+                # Empty space -> do not accept; the ViewBox will pan instead.
+                self._drag_index = None
+                return
+            spot = pts[0]
+            data_idx = spot.data()
+            self._drag_index = (int(data_idx) if data_idx is not None
+                                else int(spot.index()))
             ev.accept()
-        else:
-            ev.ignore()
-
-    def mouseMoveEvent(self, ev):
-        if self._dragging_point_idx is None:
-            ev.ignore()
+        elif self._drag_index is None:
             return
+        else:
+            ev.accept()
+
         vb = self.getViewBox()
         if vb is None:
-            ev.ignore()
             return
-        scene_pos = ev.scenePos()
-        view_pos = vb.mapSceneToView(scene_pos)
-        self.sigPointDragged.emit(self._dragging_point_idx, view_pos.x(), view_pos.y())
-        ev.accept()
+        view_pos = vb.mapSceneToView(ev.scenePos())
+        self.sigPointDragged.emit(
+            self._drag_index, float(view_pos.x()), float(view_pos.y()))
 
-    def mouseReleaseEvent(self, ev):
-        if self._dragging_point_idx is not None:
-            self._dragging_point_idx = None
-            self._drag_start_pos = None
-            ev.accept()
-        else:
-            ev.ignore()
+        if ev.isFinish():
+            self._drag_index = None
+            self.sigPointDragFinished.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +580,17 @@ class EchogramCore:
         self._drag_coord: Optional[float] = None
         self._drag_updating = False
 
+        # Throttle/coalesce expensive hover + crosshair work.  A fast mouse
+        # stream can otherwise back up the Qt event queue, which becomes very
+        # noticeable when the param editor has added many interactive items to
+        # the scene.  We remember only the latest scene position and process it
+        # on a ~60 Hz single-shot timer.
+        self._scene_move_timer = QtCore.QTimer()
+        self._scene_move_timer.setSingleShot(True)
+        self._scene_move_timer.setInterval(16)
+        self._scene_move_timer.timeout.connect(self._process_pending_scene_move)
+        self._pending_scene_pos: Optional[QtCore.QPointF] = None
+
         # Station data
         self._station_data_list: List[Dict[str, Any]] = []
 
@@ -563,11 +602,17 @@ class EchogramCore:
             'has_unsaved_changes': False,
             'selected_point_idx': None,
             'synced_params': set(),
-            'roi_items': {},
+            'scatter_items': {},
             'line_items': {},
             'display_indices': None,
-            '_updating_roi': False,
+            '_drag_active': False,
         }
+        # Per-slot interactive-editing toggle (slot_idx -> bool).  Missing keys
+        # default to True, i.e. every echogram view is editable.  The batched
+        # scatter representation makes interactive editing cheap on every
+        # visible slot, so this is purely a UX choice (e.g. switch a view to
+        # pure pan/zoom, or disable editing when only one echogram is shown).
+        self._slot_interactive: Dict[int, bool] = {}
 
         # Global image cache
         self._global_image_cache: Dict[str, Dict[str, Any]] = {}
@@ -791,7 +836,7 @@ class EchogramCore:
 
         # Recreate param visualization
         if self._param_edit_state.get('active_param') is not None:
-            self._param_edit_state['roi_items'] = {}
+            self._param_edit_state['scatter_items'] = {}
             self._param_edit_state['line_items'] = {}
             self._update_param_visualization()
 
@@ -1488,6 +1533,21 @@ class EchogramCore:
                 break
 
     def handle_scene_move(self, pos: QtCore.QPointF) -> None:
+        # Coalesce rapid mouse-move events: remember only the latest position
+        # and process it on a ~60 Hz timer.  Doing the hover sampling, label
+        # update and crosshair repaint on *every* raw move event backs up the
+        # event queue and makes the whole viewer feel laggy — especially while
+        # the param editor keeps a heavy interactive ROI in the scene.
+        self._pending_scene_pos = pos
+        if not self._scene_move_timer.isActive():
+            self._scene_move_timer.start()
+
+    def _process_pending_scene_move(self) -> None:
+        pos = self._pending_scene_pos
+        if pos is not None:
+            self._process_scene_move(pos)
+
+    def _process_scene_move(self, pos: QtCore.QPointF) -> None:
         for slot in self._get_visible_slots():
             if slot.plot_item is None:
                 continue
@@ -2408,7 +2468,36 @@ class EchogramCore:
 
     # -- parameter visualization --
 
+    def _is_slot_interactive(self, slot_idx: int) -> bool:
+        """Whether *slot_idx* allows interactive parameter-point editing."""
+        return self._slot_interactive.get(slot_idx, True)
+
+    def set_slot_interactive(self, slot_idx: int, enabled: bool) -> None:
+        """Enable / disable interactive parameter editing for one echogram view.
+
+        When disabled the view still *shows* the parameter (curve + points) but
+        the points are not draggable, so left-drag pans the view as usual.
+        Rebuilds the visualization so the change takes effect immediately.
+        """
+        self._slot_interactive[slot_idx] = bool(enabled)
+        if self._param_edit_state.get('active_param') is not None:
+            self._update_param_visualization()
+
     def _update_param_visualization(self) -> None:
+        """Render the parameter being edited on every visible slot.
+
+        Each slot gets exactly two scene items regardless of point count:
+
+        * one :class:`pyqtgraph.PlotCurveItem` for the connecting line, and
+        * one :class:`DraggableScatterPlotItem` for the (optionally editable)
+          control points.
+
+        This replaces the previous per-slot :class:`pyqtgraph.PolyLineROI`,
+        which created one hover-accepting handle *and* one segment per point on
+        *every* slot — i.e. ``2 * n_points * n_slots`` interactive scene items —
+        and made the whole viewer crawl.  The batched scatter keeps the cost
+        flat (two items per slot) no matter how many points or echograms.
+        """
         self._clear_param_visualization()
         param_name = self._param_edit_state['active_param']
         editing_data = self._param_edit_state['editing_data']
@@ -2421,150 +2510,143 @@ class EchogramCore:
             x_coords, y_coords = editing_data
         n_points = len(x_coords)
 
-        MAX_ROI_HANDLES = 500
-        if n_points > MAX_ROI_HANDLES:
-            step = max(1, n_points // MAX_ROI_HANDLES)
+        # The editable data is already bounded (see _load_param_for_editing),
+        # but keep a hard ceiling on the number of *interactive markers* so a
+        # pathological input can never create a giant scatter.  The connecting
+        # line always uses the full data, so the curve stays accurate even when
+        # the markers are a downsampled subset.
+        MAX_EDIT_MARKERS = 2000
+        if n_points > MAX_EDIT_MARKERS:
+            step = max(1, n_points // MAX_EDIT_MARKERS)
             display_indices = np.arange(0, n_points, step)
-            x_display = x_coords[display_indices]
-            y_display = y_coords[display_indices]
             is_downsampled = True
         else:
-            x_display = x_coords
-            y_display = y_coords
-            display_indices = np.arange(n_points) if n_points > 0 else np.array([], dtype=int)
+            display_indices = (np.arange(n_points) if n_points > 0
+                               else np.array([], dtype=int))
             is_downsampled = False
-
         self._param_edit_state['display_indices'] = display_indices
+
+        if n_points > 0:
+            x_display = x_coords[display_indices]
+            y_display = y_coords[display_indices]
+        else:
+            x_display = np.array([], dtype=np.float64)
+            y_display = np.array([], dtype=np.float64)
 
         for slot in self._get_visible_slots():
             if slot.plot_item is None:
                 continue
-            if is_downsampled and n_points > 0:
-                pen = pg.mkPen(color='#FF6600', width=2,
-                               style=QtCore.Qt.PenStyle.DashLine)
-                line_item = pg.PlotCurveItem(x_coords, y_coords, pen=pen)
-                slot.plot_item.addItem(line_item)
-                self._param_edit_state['line_items'][slot.slot_idx] = line_item
+            interactive = self._is_slot_interactive(slot.slot_idx)
 
-            if len(x_display) > 0:
-                positions = [[float(x_display[i]), float(y_display[i])]
-                             for i in range(len(x_display))]
-                roi = SafePolyLineROI(
-                    positions, closed=False,
-                    pen=pg.mkPen('#FF6600', width=2),
-                    hoverPen=pg.mkPen('#FFAA00', width=3),
-                    handlePen=pg.mkPen('#FF6600', width=1),
-                    handleHoverPen=pg.mkPen('#FF0000', width=2),
-                    movable=False, removable=False,
-                )
-                roi.sigRegionChanged.connect(
-                    lambda r=roi, s=slot: self._on_roi_changed(r, s))
-                roi.sigRegionChangeFinished.connect(
-                    lambda r=roi, s=slot: self._on_roi_change_finished(r, s))
-                slot.plot_item.addItem(roi)
-                self._param_edit_state['roi_items'][slot.slot_idx] = roi
+            # Connecting line: a single cheap curve covering ALL points.
+            line_item = pg.PlotCurveItem(
+                x_coords, y_coords, pen=pg.mkPen('#FF6600', width=2))
+            line_item.setZValue(50)
+            slot.plot_item.addItem(line_item)
+            self._param_edit_state['line_items'][slot.slot_idx] = line_item
+
+            # Control points: a single batched (draggable) scatter.  The
+            # per-point ``data`` carries the original index into editing_data so
+            # the drag signal reports the correct point even when downsampled.
+            scatter = DraggableScatterPlotItem(
+                x=x_display, y=y_display, data=list(display_indices),
+                size=10, pxMode=True,
+                brush=pg.mkBrush(255, 102, 0, 220),
+                pen=pg.mkPen(0, 0, 0, 180),
+                hoverable=interactive, hoverSize=14,
+                hoverBrush=pg.mkBrush(255, 40, 40, 240), tip=None)
+            scatter.setZValue(60)
+            scatter.setMovable(interactive)
+            scatter.sigPointDragged.connect(self._on_param_point_dragged)
+            scatter.sigPointDragFinished.connect(self._on_param_point_drag_finished)
+            slot.plot_item.addItem(scatter)
+            self._param_edit_state['scatter_items'][slot.slot_idx] = scatter
 
         if is_downsampled:
-            self.panel["param_status"].value = \
-                f"<span style='color:orange'>Showing {len(x_display)}/{n_points} handles (downsampled)</span>"
+            self.panel["param_status"].value = (
+                f"<span style='color:orange'>Showing "
+                f"{len(display_indices)}/{n_points} markers (downsampled)</span>")
         self._request_remote_draw()
 
-    def _on_roi_changed(self, roi, slot: EchogramSlot) -> None:
-        if self._param_edit_state.get('_updating_roi'):
-            return
-        self._param_edit_state['_is_dragging_roi'] = True
-        self._param_edit_state['_active_drag_slot'] = slot.slot_idx
-        self._param_edit_state['has_unsaved_changes'] = True
+    def _refresh_param_items_live(self) -> None:
+        """Push the current editing_data into every slot's line + scatter.
 
-    def _on_roi_change_finished(self, roi, slot: EchogramSlot) -> None:
-        if not self._param_edit_state.get('_is_dragging_roi'):
-            return
-        self._param_edit_state['_is_dragging_roi'] = False
-        self._param_edit_state['_active_drag_slot'] = None
+        Used during / after a drag.  Both updates are cheap (a single
+        ``setData`` on one batched item per slot)."""
         editing_data = self._param_edit_state['editing_data']
         if editing_data is None:
             return
-        try:
-            handle_positions = roi.getLocalHandlePositions()
-            if len(handle_positions) == 0:
-                return
-            x_coords, y_coords = editing_data
-            display_indices = self._param_edit_state.get('display_indices')
+        x_coords, y_coords = editing_data
+        display_indices = self._param_edit_state.get('display_indices')
+        if display_indices is not None and len(display_indices) > 0:
+            x_d = x_coords[display_indices]
+            y_d = y_coords[display_indices]
+        else:
+            x_d = x_coords
+            y_d = y_coords
+        for line in list(self._param_edit_state['line_items'].values()):
+            try:
+                line.setData(x_coords, y_coords)
+            except Exception:
+                pass
+        for scatter in list(self._param_edit_state['scatter_items'].values()):
+            try:
+                scatter.setData(x=x_d, y=y_d, data=list(display_indices)
+                                if display_indices is not None else None)
+            except Exception:
+                pass
 
-            for i, (name, pos) in enumerate(handle_positions):
-                actual_idx = (display_indices[i]
-                              if display_indices is not None and i < len(display_indices)
-                              else i)
-                if 0 <= actual_idx < len(x_coords):
-                    x_coords[actual_idx] = pos.x()
-                    y_coords[actual_idx] = pos.y()
+    def _on_param_point_dragged(self, orig_idx: int, x: float, y: float) -> None:
+        """Live handler while a control point is being dragged."""
+        editing_data = self._param_edit_state['editing_data']
+        if editing_data is None:
+            return
+        x_coords, y_coords = editing_data
+        if not (0 <= orig_idx < len(x_coords)):
+            return
+        x_coords[orig_idx] = x
+        y_coords[orig_idx] = y
+        self._param_edit_state['has_unsaved_changes'] = True
+        self._param_edit_state['_drag_active'] = True
+        # Update all synced views live (cheap: one setData per item per slot).
+        self._refresh_param_items_live()
 
-            needs_resort = any(
-                x_coords[i] > x_coords[i + 1] for i in range(len(x_coords) - 1))
-            if needs_resort:
-                sort_indices = np.argsort(x_coords)
-                x_coords = x_coords[sort_indices].copy()
-                y_coords = y_coords[sort_indices].copy()
-                self._param_edit_state['editing_data'] = (x_coords, y_coords)
-                self._clear_param_visualization()
-                self._update_param_visualization()
-                self.panel["param_status"].value = \
-                    "<span style='color:orange'>Points reordered (unsaved)</span>"
-            else:
-                self._param_edit_state['editing_data'] = (x_coords, y_coords)
-                for slot_idx, line_item in list(
-                        self._param_edit_state['line_items'].items()):
-                    try:
-                        line_item.setData(x_coords, y_coords)
-                    except Exception:
-                        pass
-                # Sync other ROIs
-                self._param_edit_state['_updating_roi'] = True
-                try:
-                    for other_idx, other_roi in list(
-                            self._param_edit_state['roi_items'].items()):
-                        if other_idx != slot.slot_idx:
-                            try:
-                                if display_indices is not None:
-                                    x_d = x_coords[display_indices]
-                                    y_d = y_coords[display_indices]
-                                else:
-                                    x_d = x_coords
-                                    y_d = y_coords
-                                positions = [[float(x_d[j]), float(y_d[j])]
-                                             for j in range(len(x_d))]
-                                other_roi.setPoints(positions)
-                            except Exception:
-                                pass
-                finally:
-                    self._param_edit_state['_updating_roi'] = False
-                self.panel["param_status"].value = \
-                    "<span style='color:orange'>Modified (unsaved)</span>"
-        except Exception as e:
-            self._report_error(f"ROI finish error: {e}")
+    def _on_param_point_drag_finished(self) -> None:
+        """Finalise a point drag: keep x monotonic, refresh, update status."""
+        self._param_edit_state['_drag_active'] = False
+        editing_data = self._param_edit_state['editing_data']
+        if editing_data is None:
+            return
+        x_coords, y_coords = editing_data
+        needs_resort = (len(x_coords) > 1
+                        and bool(np.any(np.diff(x_coords) < 0)))
+        if needs_resort:
+            order = np.argsort(x_coords, kind='stable')
+            x_coords = x_coords[order].copy()
+            y_coords = y_coords[order].copy()
+            self._param_edit_state['editing_data'] = (x_coords, y_coords)
+            self._update_param_visualization()
             self.panel["param_status"].value = \
-                f"<span style='color:red'>Error: {e}</span>"
+                "<span style='color:orange'>Points reordered (unsaved)</span>"
+        else:
+            self._refresh_param_items_live()
+            self.panel["param_status"].value = \
+                "<span style='color:orange'>Modified (unsaved)</span>"
 
     def _clear_param_visualization(self) -> None:
-        for slot_idx, roi in list(self._param_edit_state.get('roi_items', {}).items()):
-            slot = self.slots[slot_idx] if slot_idx < len(self.slots) else None
-            if slot and slot.plot_item:
-                try:
-                    slot.plot_item.removeItem(roi)
-                except Exception:
-                    pass
-        self._param_edit_state['roi_items'] = {}
-        for slot_idx, line in list(self._param_edit_state['line_items'].items()):
-            slot = self.slots[slot_idx] if slot_idx < len(self.slots) else None
-            if slot and slot.plot_item:
-                try:
-                    slot.plot_item.removeItem(line)
-                except Exception:
-                    pass
-        self._param_edit_state['line_items'].clear()
+        for container in ('scatter_items', 'line_items'):
+            for slot_idx, item in list(
+                    self._param_edit_state.get(container, {}).items()):
+                slot = self.slots[slot_idx] if slot_idx < len(self.slots) else None
+                if slot and slot.plot_item:
+                    try:
+                        slot.plot_item.removeItem(item)
+                    except Exception:
+                        pass
+            self._param_edit_state[container] = {}
 
     def _delete_selected_point(self) -> bool:
-        if self._param_edit_state.get('_is_dragging_roi'):
+        if self._param_edit_state.get('_drag_active'):
             self.panel["param_status"].value = \
                 "<span style='color:red'>Cannot delete while dragging</span>"
             return False
