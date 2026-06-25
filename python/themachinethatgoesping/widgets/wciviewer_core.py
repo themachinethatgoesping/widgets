@@ -566,11 +566,12 @@ class WCICore:
             self._reference_timestamp = new_ts
             self._update_ref_time_display()
 
+        fast_mode = self._autoplay_active
         if slot.is_visible:
-            self._update_slot(slot)
+            self._update_slot(slot, fast_mode=fast_mode)
 
         if self.time_sync_enabled:
-            self._sync_other_slots(slot_idx)
+            self._sync_other_slots(slot_idx, fast_mode=fast_mode)
 
         for callback in self._ping_change_callbacks:
             try:
@@ -635,7 +636,7 @@ class WCICore:
     # Time synchronisation
     # =====================================================================
 
-    def _sync_other_slots(self, reference_slot_idx: int) -> None:
+    def _sync_other_slots(self, reference_slot_idx: int, fast_mode: bool = False) -> None:
         ref_ts = self._reference_timestamp
         if ref_ts is None:
             return
@@ -660,7 +661,7 @@ class WCICore:
                 # and bounce the synchronisation back and forth).
                 self.panel[f"ping_slider_{i}"].set_silent(closest_idx)
                 if slot.is_visible:
-                    self._update_slot(slot)
+                    self._update_slot(slot, fast_mode=fast_mode)
                 self._update_time_offset_text(slot)
         finally:
             self._syncing = False

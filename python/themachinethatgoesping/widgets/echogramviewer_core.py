@@ -575,6 +575,14 @@ class EchogramCore:
         self._pingline_update_in_progress: bool = False
         self._cached_pingline_index: Optional[int] = None
         self._cached_pingline_value: Optional[float] = None
+        # Coalesce pingline/stack overlay sync during WCI autoplay so the
+        # echogram view is not forced to process every playback tick.
+        self._pingline_autoplay_interval_s: float = 1.0 / 30.0
+        self._last_pingline_update_ts: float = 0.0
+        self._pending_pingline_update: bool = False
+        self._pingline_timer = QtCore.QTimer()
+        self._pingline_timer.setSingleShot(True)
+        self._pingline_timer.timeout.connect(self._flush_pending_pingline_update)
 
         # Drag-throttle state for pingline dragging
         self._drag_timer = QtCore.QTimer()
@@ -2758,7 +2766,7 @@ class EchogramCore:
         self._build_ping_index(progress=progress)
         self._update_ping_lines()
         if hasattr(pingviewer, 'register_ping_change_callback'):
-            pingviewer.register_ping_change_callback(self._update_ping_lines)
+            pingviewer.register_ping_change_callback(self._on_pingviewer_ping_change)
         # Keep the stack overlay in sync when the stack size/step is changed
         # from the WCI side (no ping change involved).
         if hasattr(pingviewer, 'register_view_change_callback'):
@@ -2777,7 +2785,7 @@ class EchogramCore:
     def disconnect_pingviewer(self) -> None:
         if self.pingviewer is not None:
             if hasattr(self.pingviewer, 'unregister_ping_change_callback'):
-                self.pingviewer.unregister_ping_change_callback(self._update_ping_lines)
+                self.pingviewer.unregister_ping_change_callback(self._on_pingviewer_ping_change)
             if hasattr(self.pingviewer, 'unregister_view_change_callback'):
                 self.pingviewer.unregister_view_change_callback(self._update_ping_lines)
             if self._depth_sync_active:
@@ -2787,6 +2795,9 @@ class EchogramCore:
                 self.unregister_depth_change_callback(
                     self.pingviewer.set_external_crosshair_depth)
                 self._depth_sync_active = False
+        if self._pingline_timer.isActive():
+            self._pingline_timer.stop()
+        self._pending_pingline_update = False
         self.pingviewer = None
         self._ping_timestamps = None
         for slot in self.slots:
@@ -2964,6 +2975,40 @@ class EchogramCore:
         # Single-channel Jupyter viewer
         elif hasattr(self.pingviewer, 'w_index'):
             self.pingviewer.w_index.value = idx
+
+    def _pingviewer_autoplay_active(self) -> bool:
+        pv = self.pingviewer
+        return bool(getattr(pv, '_autoplay_active', False)) if pv is not None else False
+
+    def _on_pingviewer_ping_change(self) -> None:
+        """Handle ping changes from WCI with autoplay-aware throttling."""
+        if not self._pingviewer_autoplay_active():
+            self._pending_pingline_update = False
+            self._update_ping_lines()
+            return
+
+        now = time_module.time()
+        elapsed = now - self._last_pingline_update_ts
+        if elapsed >= self._pingline_autoplay_interval_s and not self._pingline_timer.isActive():
+            self._pending_pingline_update = False
+            self._last_pingline_update_ts = now
+            self._update_ping_lines()
+            return
+
+        self._pending_pingline_update = True
+        wait_ms = max(
+            1,
+            int(max(0.0, self._pingline_autoplay_interval_s - elapsed) * 1000.0),
+        )
+        if not self._pingline_timer.isActive():
+            self._pingline_timer.start(wait_ms)
+
+    def _flush_pending_pingline_update(self) -> None:
+        if not self._pending_pingline_update:
+            return
+        self._pending_pingline_update = False
+        self._last_pingline_update_ts = time_module.time()
+        self._update_ping_lines()
 
     # -- stack overlay helpers --------------------------------------------
 
