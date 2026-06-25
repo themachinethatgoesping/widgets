@@ -386,7 +386,8 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
         ctrl_vlayout.addLayout(render_row)
         # Nav row
         nav_row = QtWidgets.QHBoxLayout()
-        for name in ["btn_update", "btn_reset", "btn_autoscale_y", "auto_follow", "btn_goto_pingline"]:
+        for name in ["btn_update", "btn_reset", "btn_autoscale_y", "auto_follow",
+                     "btn_goto_pingline", "show_stack", "stack_opacity"]:
             if name in self.panel:
                 nav_row.addWidget(self.panel[name].widget)
         nav_row.addWidget(QtWidgets.QLabel("  Nav:"))
@@ -483,7 +484,8 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
 
         # -- Nav controls --
         nav_row = QtWidgets.QHBoxLayout()
-        for n in ("btn_update", "btn_reset", "btn_autoscale_y", "auto_follow", "btn_goto_pingline"):
+        for n in ("btn_update", "btn_reset", "btn_autoscale_y", "auto_follow",
+                  "btn_goto_pingline", "show_stack", "stack_opacity"):
             if n in self.panel:
                 nav_row.addWidget(self.panel[n].widget)
         nav_row.addWidget(QtWidgets.QLabel("  Nav:"))

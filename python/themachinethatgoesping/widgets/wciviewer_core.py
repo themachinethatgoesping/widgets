@@ -310,6 +310,7 @@ class WCICore:
         self._crosshair_enabled = True
         self._crosshair_position: Optional[Tuple[float, float]] = None
         self._ping_change_callbacks: List[Any] = []
+        self._view_change_callbacks: List[Any] = []
         self._depth_change_callbacks: List[Any] = []
         self._external_crosshair_depth: Optional[float] = None
         self._ignore_range_changes = False
@@ -609,6 +610,9 @@ class WCICore:
     def on_global_param_change(self) -> None:
         self._sync_builder_args()
         self._update_all_visible()
+        # Notify connected viewers (e.g. the echogram stack overlay) that a
+        # display parameter such as the stack size / step changed.
+        self._fire_view_change()
 
     def on_video_format_change(self, fmt: str) -> None:
         if fmt == "frames":
@@ -1434,6 +1438,24 @@ class WCICore:
     def unregister_ping_change_callback(self, callback: Any) -> None:
         if callback in self._ping_change_callbacks:
             self._ping_change_callbacks.remove(callback)
+
+    def register_view_change_callback(self, callback: Any) -> None:
+        """Register a callback fired when a display parameter (e.g. the stack
+        size/step) changes.  Connected viewers use this to keep overlays such
+        as the echogram stack region in sync."""
+        if callback not in self._view_change_callbacks:
+            self._view_change_callbacks.append(callback)
+
+    def unregister_view_change_callback(self, callback: Any) -> None:
+        if callback in self._view_change_callbacks:
+            self._view_change_callbacks.remove(callback)
+
+    def _fire_view_change(self) -> None:
+        for callback in self._view_change_callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
 
     # =====================================================================
     # Compatibility properties

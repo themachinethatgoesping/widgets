@@ -388,6 +388,10 @@ class EchogramSlot:
         self.crosshair_v: Optional[pg.InfiniteLine] = None
         self.crosshair_h: Optional[pg.InfiniteLine] = None
         self.pingline: Optional[pg.InfiniteLine] = None
+        # Draggable region showing the connected WCI viewer's ping-stack span.
+        # Its leading (smaller-x) edge doubles as the current-ping marker, so
+        # the separate ``pingline`` is hidden while the region is shown.
+        self.stack_region: Optional[pg.LinearRegionItem] = None
         self.station_overlay_bg: Optional[StationOverlayItem] = None
         self.station_overlay_fg: Optional[StationOverlayItem] = None
 
@@ -580,6 +584,14 @@ class EchogramCore:
         self._drag_coord: Optional[float] = None
         self._drag_updating = False
 
+        # Stack-region drag state.  While the user drags the region we only do
+        # the cheap visual move live and defer the expensive WCI rebuild to the
+        # throttle timer (``_pending_region`` holds the latest snapped
+        # (index, stack)).  ``_region_dragging`` prevents the WCI ping/view
+        # callbacks from fighting the in-progress drag.
+        self._region_dragging: bool = False
+        self._pending_region: Optional[Tuple[int, int]] = None
+
         # Throttle/coalesce expensive hover + crosshair work.  A fast mouse
         # stream can otherwise back up the Qt event queue, which becomes very
         # noticeable when the param editor has added many interactive items to
@@ -681,6 +693,13 @@ class EchogramCore:
         p["btn_reset"].on_click(lambda _: self.reset_view())
         p["btn_autoscale_y"].on_click(lambda _: self.autoscale_y())
         p["btn_goto_pingline"].on_click(lambda _: self.goto_pingline())
+
+        # Stack overlay controls (optional: only if the adapter wired them).
+        for key in ("show_stack", "stack_opacity"):
+            try:
+                p[key].on_change(lambda _: self._update_ping_lines())
+            except (KeyError, AttributeError):
+                pass
 
         p["btn_nav_left"].on_click(lambda _: self.pan_view('left'))
         p["btn_nav_right"].on_click(lambda _: self.pan_view('right'))
@@ -814,6 +833,7 @@ class EchogramCore:
             plot.addItem(slot.crosshair_h)
 
             slot.pingline = None
+            slot.stack_region = None
             slot.station_overlay_bg = None
             slot.station_overlay_fg = None
 
@@ -842,6 +862,12 @@ class EchogramCore:
 
         # Recreate param-display overlays after grid change
         self._update_param_display_all()
+
+        # Recreate the pingline / stack-region overlays after a grid rebuild
+        # (the previous items were dropped by graphics.clear()).
+        if self.pingviewer is not None:
+            self._cached_pingline_index = None
+            self._update_ping_lines()
 
     # =====================================================================
     # Event handlers (called by adapters or wire_observers)
@@ -2733,6 +2759,10 @@ class EchogramCore:
         self._update_ping_lines()
         if hasattr(pingviewer, 'register_ping_change_callback'):
             pingviewer.register_ping_change_callback(self._update_ping_lines)
+        # Keep the stack overlay in sync when the stack size/step is changed
+        # from the WCI side (no ping change involved).
+        if hasattr(pingviewer, 'register_view_change_callback'):
+            pingviewer.register_view_change_callback(self._update_ping_lines)
 
         # Sync horizontal crosshair (depth / range) between viewers
         self._depth_sync_active = False
@@ -2748,6 +2778,8 @@ class EchogramCore:
         if self.pingviewer is not None:
             if hasattr(self.pingviewer, 'unregister_ping_change_callback'):
                 self.pingviewer.unregister_ping_change_callback(self._update_ping_lines)
+            if hasattr(self.pingviewer, 'unregister_view_change_callback'):
+                self.pingviewer.unregister_view_change_callback(self._update_ping_lines)
             if self._depth_sync_active:
                 if hasattr(self.pingviewer, 'unregister_depth_change_callback'):
                     self.pingviewer.unregister_depth_change_callback(
@@ -2760,6 +2792,8 @@ class EchogramCore:
         for slot in self.slots:
             if slot.pingline:
                 slot.pingline.hide()
+            if slot.stack_region:
+                slot.stack_region.hide()
 
     def set_depth_sync_enabled(self, enabled: bool) -> None:
         """Enable or disable depth crosshair sync without disconnecting."""
@@ -2931,48 +2965,177 @@ class EchogramCore:
         elif hasattr(self.pingviewer, 'w_index'):
             self.pingviewer.w_index.value = idx
 
+    # -- stack overlay helpers --------------------------------------------
+
+    def _show_stack_enabled(self) -> bool:
+        try:
+            return bool(self.panel["show_stack"].value)
+        except Exception:
+            return True
+
+    def _stack_opacity(self) -> float:
+        try:
+            return float(self.panel["stack_opacity"].value)
+        except Exception:
+            return 0.15
+
+    @staticmethod
+    def _stack_brush(opacity: float):
+        a = int(max(0.0, min(1.0, opacity)) * 255)
+        return pg.mkBrush(30, 120, 220, a)
+
+    def _get_pingviewer_stack(self) -> Tuple[int, int]:
+        """Return ``(stack, stack_step)`` from the connected WCI viewer."""
+        pv = self.pingviewer
+        stack, step = 1, 1
+        if pv is not None and hasattr(pv, "panel"):
+            try:
+                if "stack" in pv.panel:
+                    stack = max(1, int(pv.panel["stack"].value))
+                if "stack_step" in pv.panel:
+                    step = max(1, int(pv.panel["stack_step"].value))
+            except Exception:
+                pass
+        return stack, step
+
+    def _ping_index_to_coord(self, idx: int) -> Optional[float]:
+        """Map a ping index to the current x-axis coordinate (forward map)."""
+        pings = self._get_pingviewer_pings()
+        if pings is None or len(pings) == 0:
+            return None
+        n = len(pings)
+        idx = int(max(0, min(idx, n - 1)))
+        match self.x_axis_name:
+            case "Ping number" | "Ping index":
+                return float(idx)
+            case "Date time":
+                ping = pings[idx]
+                if isinstance(ping, dict):
+                    ping = next(iter(ping.values()))
+                return self._real_time_to_display(ping.get_timestamp()) / 86400.0
+            case "Ping time":
+                ping = pings[idx]
+                if isinstance(ping, dict):
+                    ping = next(iter(ping.values()))
+                return self._real_time_to_display(ping.get_timestamp())
+            case _:
+                first_eg = next(iter(self.echograms.values()), None)
+                if first_eg is not None and hasattr(first_eg, "_coord_system"):
+                    ppc = getattr(first_eg._coord_system, "_custom_x_per_ping", None)
+                    if ppc is not None and idx < len(ppc):
+                        return float(ppc[idx])
+        return None
+
+    def _ensure_pingline(self, slot: EchogramSlot) -> Optional[pg.InfiniteLine]:
+        if slot.pingline is None:
+            if slot.plot_item is None:
+                return None
+            line = pg.InfiniteLine(
+                angle=90, movable=True,
+                pen=pg.mkPen(color='k', style=QtCore.Qt.PenStyle.DashLine))
+            try:
+                line.setHoverPen(pg.mkPen(color='k', width=2,
+                                          style=QtCore.Qt.PenStyle.DashLine))
+            except Exception:
+                pass
+            line.sigPositionChanged.connect(self._on_pingline_dragged)
+            slot.plot_item.addItem(line)
+            slot.pingline = line
+        return slot.pingline
+
+    def _ensure_stack_region(self, slot: EchogramSlot) -> Optional[pg.LinearRegionItem]:
+        if slot.stack_region is not None:
+            return slot.stack_region
+        if slot.plot_item is None:
+            return None
+        accent = (30, 120, 220)
+        region = pg.LinearRegionItem(
+            values=(0, 0), orientation='vertical',
+            brush=self._stack_brush(self._stack_opacity()),
+            hoverBrush=self._stack_brush(min(0.6, self._stack_opacity() + 0.12)),
+            movable=True, swapMode='sort')
+        # Style the two boundary lines independently: the leading (smaller-x)
+        # edge is the current-ping marker (dashed black, matching the pingline);
+        # the trailing edge is the accent-coloured stack end.
+        try:
+            region.lines[0].setPen(pg.mkPen(color='k', width=1,
+                                            style=QtCore.Qt.PenStyle.DashLine))
+            region.lines[0].setHoverPen(pg.mkPen(color='k', width=2,
+                                                 style=QtCore.Qt.PenStyle.DashLine))
+            region.lines[1].setPen(pg.mkPen(color=accent, width=1))
+            region.lines[1].setHoverPen(pg.mkPen(color=accent, width=2))
+        except Exception:
+            pass
+        region.setZValue(20)
+        region.sigRegionChanged.connect(
+            lambda r, s=slot: self._on_stack_region_changed(s, r))
+        region.sigRegionChangeFinished.connect(
+            lambda r, s=slot: self._on_stack_region_finished(s, r))
+        slot.plot_item.addItem(region)
+        slot.stack_region = region
+        return region
+
     def _update_ping_lines(self) -> None:
         if self.pingviewer is None:
             return
+        # Never fight an in-progress region drag: the drag handler owns the
+        # visuals until the user releases.
+        if self._region_dragging:
+            return
         idx = self._get_pingviewer_current_index()
-        # Use cached value when ping index hasn't changed
+        # Leading coord = current ping. Use cache when the index is unchanged.
         if idx == self._cached_pingline_index and self._cached_pingline_value is not None:
             value = self._cached_pingline_value
         else:
-            ping = self._get_current_ping()
-            if ping is None:
+            value = self._ping_index_to_coord(idx)
+            if value is None:
                 return
-            match self.x_axis_name:
-                case "Ping number" | "Ping index":
-                    value = float(idx)
-                case "Date time":
-                    value = self._real_time_to_display(
-                        ping.get_timestamp()) / 86400.0
-                case "Ping time":
-                    value = self._real_time_to_display(ping.get_timestamp())
-                case _:
-                    return
             self._cached_pingline_index = idx
             self._cached_pingline_value = value
+
+        stack, _step = self._get_pingviewer_stack()
+        pings = self._get_pingviewer_pings()
+        n = len(pings) if pings is not None else 0
+        show_region = self._show_stack_enabled() and stack > 1 and n > 0
+        trail = None
+        if show_region:
+            last_idx = min(idx + stack, n) - 1
+            trail = self._ping_index_to_coord(last_idx)
+            if trail is None or trail <= value:
+                show_region = False
+
         for slot in self._get_visible_slots():
             if slot.plot_item is None:
                 continue
-            if slot.pingline is None:
-                line = pg.InfiniteLine(
-                    angle=90, movable=True, pen=pg.mkPen(
-                        color='k', style=QtCore.Qt.PenStyle.DashLine))
-                line.sigPositionChanged.connect(self._on_pingline_dragged)
-                slot.plot_item.addItem(line)
-                slot.pingline = line
-            slot.pingline.blockSignals(True)
-            slot.pingline.setValue(value)
-            slot.pingline.blockSignals(False)
-            slot.pingline.show()
+            if show_region:
+                # The region's leading edge doubles as the ping marker, so the
+                # separate pingline is hidden to avoid two coincident handles.
+                if slot.pingline is not None:
+                    slot.pingline.hide()
+                region = self._ensure_stack_region(slot)
+                if region is None:
+                    continue
+                region.setBrush(self._stack_brush(self._stack_opacity()))
+                region.blockSignals(True)
+                region.setRegion((value, trail))
+                region.blockSignals(False)
+                region.show()
+            else:
+                if slot.stack_region is not None:
+                    slot.stack_region.hide()
+                line = self._ensure_pingline(slot)
+                if line is None:
+                    continue
+                line.blockSignals(True)
+                line.setValue(value)
+                line.blockSignals(False)
+                line.show()
+
         scrolled = False
         if self.panel["auto_follow"].value:
             scrolled = self._auto_follow_pingline(value)
         # Only force a frame render when auto_follow actually scrolled;
-        # otherwise the InfiniteLine move renders on the next natural frame.
+        # otherwise the item move renders on the next natural frame.
         if scrolled:
             self._request_remote_draw()
         else:
@@ -3032,12 +3195,95 @@ class EchogramCore:
                 pl.setValue(coord)
                 pl.blockSignals(False)
         # Store latest coord and (re)start the timer
+        self._pending_region = None
         self._drag_coord = coord
         if not self._drag_updating:
             self._drag_timer.start()
 
+    def _on_stack_region_changed(self, slot: EchogramSlot,
+                                 region: pg.LinearRegionItem) -> None:
+        """Live handler while a stack region is dragged.
+
+        Mirrors the move onto the other slots' regions (cheap, no rebuild) and
+        schedules a throttled WCI rebuild with the snapped (index, stack).
+        """
+        self._region_dragging = True
+        try:
+            x0, x1 = region.getRegion()
+        except Exception:
+            return
+        for other in self._get_visible_slots():
+            if other is slot:
+                continue
+            oreg = other.stack_region
+            if oreg is not None:
+                oreg.blockSignals(True)
+                oreg.setRegion((x0, x1))
+                oreg.blockSignals(False)
+        new_index = self._coord_to_ping_index(x0)
+        new_last = self._coord_to_ping_index(x1)
+        if new_index is None or new_last is None:
+            return
+        new_stack = max(1, int(new_last) - int(new_index) + 1)
+        # A region drag drives both index and stack; clear any stale pingline
+        # coordinate so the throttle dispatches the region branch.
+        self._drag_coord = None
+        self._pending_region = (int(new_index), int(new_stack))
+        if not self._drag_updating:
+            self._drag_timer.start()
+
+    def _on_stack_region_finished(self, slot: EchogramSlot,
+                                  region: pg.LinearRegionItem) -> None:
+        """Commit the final region position when the drag is released."""
+        self._region_dragging = False
+        if self._pending_region is not None:
+            self._on_drag_timer_fired()
+        # Force a fresh sync so the region snaps to discrete ping positions.
+        self._cached_pingline_index = None
+        self._update_ping_lines()
+
+    def _apply_stack_to_pingviewer(self, index: int, stack: int) -> None:
+        """Apply a (start index, stack span) edit to the connected WCI viewer.
+
+        Performs exactly one WCI rebuild: the stack is written silently and the
+        index change (or, when only the stack changed, an explicit refresh)
+        triggers the single rebuild that reads the new stack.
+        """
+        pv = self.pingviewer
+        if pv is None:
+            return
+        changed_stack = False
+        if hasattr(pv, "panel"):
+            try:
+                if "stack" in pv.panel:
+                    cur_stack = int(pv.panel["stack"].value)
+                    if cur_stack != int(stack):
+                        pv.panel["stack"].set_silent(int(stack))
+                        changed_stack = True
+            except Exception:
+                pass
+        cur_index = self._get_pingviewer_current_index()
+        if int(index) != int(cur_index):
+            self._set_pingviewer_index(int(index))
+        elif changed_stack and hasattr(pv, "on_global_param_change"):
+            pv.on_global_param_change()
+
     def _on_drag_timer_fired(self) -> None:
-        """Dispatch the most recent drag coordinate to the pingviewer."""
+        """Dispatch the most recent throttled drag edit to the pingviewer."""
+        # A pending region edit (index + stack) takes priority.
+        if self._pending_region is not None:
+            index, stack = self._pending_region
+            self._pending_region = None
+            if self.pingviewer is None:
+                return
+            self._drag_updating = True
+            try:
+                self._apply_stack_to_pingviewer(index, stack)
+            finally:
+                self._drag_updating = False
+            if self._pending_region is not None:
+                self._drag_timer.start()
+            return
         coord = self._drag_coord
         if coord is None or self.pingviewer is None:
             return

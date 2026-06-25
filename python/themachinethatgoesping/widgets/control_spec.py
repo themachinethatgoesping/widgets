@@ -386,6 +386,12 @@ ECHO_NAV_SPECS: List[ControlSpecType] = [
                  tooltip="Automatically keep pingline in view", value=False),
     ButtonSpec("btn_goto_pingline", "→ Ping",
                tooltip="Jump to current ping line position", width="70px"),
+    CheckboxSpec("show_stack", "Show stack", value=True,
+                 tooltip="Show the connected WCI viewer's ping-stack span as a "
+                         "draggable region on the echogram (drag edges to resize "
+                         "the stack, drag the body to move it)"),
+    FloatSliderSpec("stack_opacity", "Stack α", min=0.0, max=0.6, step=0.05,
+                    value=0.15, width="150px"),
     ButtonSpec("btn_nav_left", "◀", width="35px"),
     ButtonSpec("btn_nav_right", "▶", width="35px"),
     ButtonSpec("btn_nav_up", "▲", width="35px"),
@@ -460,6 +466,7 @@ ECHO_TAB_LAYOUT: Dict[str, List[List[str]]] = {
     ],
     "Navigation": [
         ["btn_update", "btn_reset", "btn_autoscale_y", "auto_follow", "btn_goto_pingline"],
+        ["show_stack", "stack_opacity"],
         ["btn_nav_left", "btn_nav_up", "btn_nav_down", "btn_nav_right"],
         ["x_interval", "btn_set_x_interval"],
     ],
