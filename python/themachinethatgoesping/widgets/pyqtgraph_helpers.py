@@ -17,6 +17,7 @@ __all__ = [
     "resolve_colormap",
     "list_colormaps",
     "apply_widget_layout",
+    "responsive_row",
 ]
 
 
@@ -312,26 +313,94 @@ def list_colormaps(source: Optional[str] = None) -> List[str]:
 
 
 def apply_widget_layout(widget: ipywidgets.Widget, width_px: int, height_px: int) -> None:
-    """Attach a resizable layout to the GraphicsLayoutWidget wrapper."""
+    """Configure a ``jupyter_rfb`` graphics widget to fill its container width
+    and resize like a native Qt widget.
 
-    width = f"{width_px}px"
-    height = f"{height_px}px"
+    ``pyqtgraph.jupyter.GraphicsLayoutWidget`` is a subclass of
+    :class:`jupyter_rfb.RemoteFrameBuffer`, which already provides everything we
+    need for Qt-like resizing:
+
+    * a ``resizable`` trait (native drag handle in the bottom-right corner), and
+    * a ``ResizeObserver`` on the canvas that re-renders the Qt scene whenever
+      the canvas size changes — so it adapts to the notebook/window width
+      automatically.
+
+    The previous implementation *fought* this by imposing an ipywidgets
+    ``layout.resize`` handle plus ``overflow='auto'`` and a fixed pixel
+    ``layout.width``.  That produced (a) two competing resize mechanisms,
+    (b) scrollbars, (c) a host element with a fixed height while the inner RFB
+    wrapper shrank — leaving a large empty gap under the plot — and (d) controls
+    that never reflowed.  In addition, when the RFB frontend has no explicit
+    width it clamps itself to ``max-width: 90vmin`` (the "weird maximum width").
+
+    Here we instead cooperate with ``jupyter_rfb``:
+
+    * ``css_width='100%'``  → wrapper fills the available width (removes the
+      ``90vmin`` clamp and makes the plot follow the window/output width),
+    * ``css_height='<px>'`` → a definite starting height that is still
+      drag-resizable via the native handle,
+    * ``resizable=True``    → native RFB resize handle on both axes,
+    * the ipywidgets host ``layout`` only fills the width and gets out of the
+      way (``height='auto'``, ``overflow='visible'``, no resize handle).
+
+    Note
+    ----
+    ``GraphicsView.__init__`` parses ``css_width``/``css_height`` as pixels
+    (``int(css_width[:-2])``), so the widget must be *constructed* with a
+    ``"<n>px"`` string.  This helper is always called *after* construction, so
+    it is safe to switch ``css_width`` to ``"100%"`` here.
+    """
+
+    # -- jupyter_rfb native traits: the preferred sizing mechanism --
+    if hasattr(widget, "resizable"):
+        widget.resizable = True
+    # css_width='100%' makes the RFB wrapper fill its parent and removes the
+    # frontend's default 'max-width: 90vmin' clamp.  css_height stays a definite
+    # pixel value so there is a sensible starting height and a drag target.
+    if hasattr(widget, "css_width"):
+        widget.css_width = "100%"
+    if hasattr(widget, "css_height"):
+        widget.css_height = f"{height_px}px"
+
+    # -- ipywidgets host layout: fill the width, otherwise stay out of the way --
     layout = getattr(widget, "layout", None)
     if layout is None:
-        layout = ipywidgets.Layout(
-            width=width,
-            height=height,
-            min_height="0px",
-            resize="vertical",
-            overflow="auto",
-        )
+        layout = ipywidgets.Layout()
         widget.layout = layout
-    else:
-        layout.width = width
-        layout.height = height
-        layout.min_height = "0px"
-        layout.resize = "vertical"
-        layout.overflow = "auto"
+    layout.width = "100%"
+    # 'auto' lets the host wrap the RFB wrapper tightly (no empty gap under the
+    # plot); the wrapper's own css_height drives the actual height.
+    layout.height = "auto"
+    layout.max_width = "100%"
+    # A small floor keeps the plot usable on very narrow screens without
+    # forcing a horizontal scrollbar.
+    layout.min_width = f"{max(160, min(width_px, 240))}px"
+    layout.min_height = "0px"
+    # Never clip the native resize handle (it sits at the wrapper's edge) and
+    # never introduce scrollbars.
+    layout.overflow = "visible"
+    # Remove any ipywidgets-level resize handle from a previous configuration so
+    # it does not compete with jupyter_rfb's own handle.
+    layout.resize = "none"
+
+
+def responsive_row(children, *, align_items: str = "center",
+                   justify_content: Optional[str] = None) -> "ipywidgets.HBox":
+    """Return an :class:`ipywidgets.HBox` that reflows when space runs out.
+
+    Unlike a plain ``HBox`` (which keeps all children on a single, non-shrinking
+    row), this container fills the available width and wraps its children onto
+    new lines as the viewer/window gets narrower — so control rows behave like
+    the freely re-flowing panels of the native Qt viewers.
+    """
+    layout = ipywidgets.Layout(
+        width="100%",
+        flex_flow="row wrap",
+        align_items=align_items,
+    )
+    if justify_content is not None:
+        layout.justify_content = justify_content
+    return ipywidgets.HBox(list(children), layout=layout)
 
 
 def _matplotlib_colormap(name: str) -> Optional[pg.ColorMap]:

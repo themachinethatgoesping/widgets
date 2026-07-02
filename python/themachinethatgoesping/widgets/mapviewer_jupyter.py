@@ -561,17 +561,17 @@ class MapViewerJupyter:
                 parts.append(p.widget("colorbar_layer"))
 
         # Navigation
-        parts.append(ipywidgets.HBox([
+        parts.append(pgh.responsive_row([
             p.widget("btn_zoom_fit"), p.widget("btn_zoom_track"),
             p.widget("btn_zoom_wci"), p.widget("btn_refresh_tracks"),
         ]))
-        parts.append(ipywidgets.HBox([
+        parts.append(pgh.responsive_row([
             p.widget("auto_update"), p.widget("auto_center_wci"),
         ]))
         parts.append(p.widget("lbl_coords"))
         parts.append(self._track_legend)
 
-        return ipywidgets.VBox(parts)
+        return ipywidgets.VBox(parts, layout=ipywidgets.Layout(width="100%"))
 
     # =====================================================================
     # Layout
@@ -608,23 +608,24 @@ class MapViewerJupyter:
 
         # Navigation controls
         controls_list.append(ipywidgets.HTML("<b>Navigation</b>"))
-        controls_list.append(ipywidgets.HBox([
+        controls_list.append(pgh.responsive_row([
             p.widget("btn_zoom_fit"), p.widget("btn_zoom_track"),
             p.widget("btn_zoom_wci"), p.widget("btn_refresh_tracks"),
         ]))
-        controls_list.append(ipywidgets.HBox([
+        controls_list.append(pgh.responsive_row([
             p.widget("auto_update"), p.widget("auto_center_wci"),
         ]))
         controls_list.append(p.widget("lbl_coords"))
 
-        self._controls_box = ipywidgets.VBox(controls_list)
+        self._controls_box = ipywidgets.VBox(
+            controls_list, layout=ipywidgets.Layout(width="100%"))
 
         self.layout = ipywidgets.VBox([
-            ipywidgets.HBox([self.graphics]),
+            self.graphics,
             self._controls_box,
             self._track_legend,
             self.output,
-        ])
+        ], layout=ipywidgets.Layout(width="100%"))
 
     # =====================================================================
     # Display

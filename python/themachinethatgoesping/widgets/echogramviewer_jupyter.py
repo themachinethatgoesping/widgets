@@ -232,6 +232,8 @@ class EchogramViewerJupyter:
                              self._slot_interactive_checks[i]])
             for i in range(n_visible)
         ]
+        self._slot_selector_box.layout.flex_flow = "row wrap"
+        self._slot_selector_box.layout.width = "100%"
 
     def _report_error(self, msg: str) -> None:
         with self.output:
@@ -396,19 +398,19 @@ class EchogramViewerJupyter:
         p = self.panel
         n_visible = self.core.grid_rows * self.core.grid_cols
 
-        slot_box = ipywidgets.HBox(
+        slot_box = pgh.responsive_row(
             [ipywidgets.HBox([self._slot_selectors[i],
                               self._slot_interactive_checks[i]])
              for i in range(n_visible)]
         )
-        tab_box = ipywidgets.HBox(self._tab_buttons)
+        tab_box = pgh.responsive_row(self._tab_buttons)
 
-        controls_row = ipywidgets.HBox([
+        controls_row = pgh.responsive_row([
             p.widget("layout"), p.widget("colorbar_layer"),
             p.widget("vmin"), p.widget("vmax"),
             p.widget("auto_update"), p.widget("crosshair"),
         ])
-        buttons_row = ipywidgets.HBox([
+        buttons_row = pgh.responsive_row([
             p.widget("btn_update"), p.widget("btn_reset"),
             p.widget("btn_autoscale_y"),
             p.widget("auto_follow"), p.widget("btn_goto_pingline"),
@@ -424,14 +426,17 @@ class EchogramViewerJupyter:
             else ipywidgets.HBox([])
         )
 
-        return ipywidgets.VBox([
-            tab_box,
-            slot_box,
-            controls_row,
-            buttons_row,
-            self.hover_label,
-            progress_box,
-        ])
+        return ipywidgets.VBox(
+            [
+                tab_box,
+                slot_box,
+                controls_row,
+                buttons_row,
+                self.hover_label,
+                progress_box,
+            ],
+            layout=ipywidgets.Layout(width="100%"),
+        )
 
     # =====================================================================
     # Layout assembly
@@ -446,13 +451,13 @@ class EchogramViewerJupyter:
             ipywidgets.HBox([self._slot_selectors[i],
                              self._slot_interactive_checks[i]])
             for i in range(n_visible)]
-        self._slot_selector_box = ipywidgets.HBox(visible_selectors)
+        self._slot_selector_box = pgh.responsive_row(visible_selectors)
 
         # Tab buttons row (quick single-view)
-        tab_box = ipywidgets.HBox(self._tab_buttons)
+        tab_box = pgh.responsive_row(self._tab_buttons)
 
         # Controls row: grid layout, color settings
-        controls_row = ipywidgets.HBox([
+        controls_row = pgh.responsive_row([
             p.widget("layout"),
             p.widget("colorbar_layer"),
             p.widget("vmin"),
@@ -462,7 +467,7 @@ class EchogramViewerJupyter:
         ])
 
         # Navigation buttons row
-        buttons_row = ipywidgets.HBox([
+        buttons_row = pgh.responsive_row([
             p.widget("btn_update"),
             p.widget("btn_reset"),
             p.widget("btn_autoscale_y"),
@@ -481,27 +486,27 @@ class EchogramViewerJupyter:
 
         # Param editor in collapsible accordion
         param_rows = ipywidgets.VBox([
-            ipywidgets.HBox(p.widgets(
+            pgh.responsive_row(p.widgets(
                 "param_master", "param_select", "btn_refresh_params")),
-            ipywidgets.HBox(p.widgets(
+            pgh.responsive_row(p.widgets(
                 "new_param_name", "btn_new_param", "btn_copy_param", "btn_copy_to_all")),
-            ipywidgets.HBox(p.widgets(
+            pgh.responsive_row(p.widgets(
                 "btn_add_point", "btn_del_point", "param_sync",
                 "btn_apply_param", "btn_discard_param")),
             p.widget("param_status"),
             p.widget("param_help"),
-        ])
+        ], layout=ipywidgets.Layout(width="100%"))
         param_accordion = ipywidgets.Accordion(children=[param_rows])
         param_accordion.set_title(0, "Parameter Editor")
         param_accordion.selected_index = None  # collapsed by default
 
         # Param display in its own collapsible accordion
         param_display_rows = ipywidgets.VBox([
-            ipywidgets.HBox(p.widgets(
+            pgh.responsive_row(p.widgets(
                 "param_display", "btn_refresh_param_display")),
-            ipywidgets.HBox(p.widgets(
+            pgh.responsive_row(p.widgets(
                 "param_display_cmap", "param_display_size", "param_display_max_points")),
-        ])
+        ], layout=ipywidgets.Layout(width="100%"))
         param_display_accordion = ipywidgets.Accordion(children=[param_display_rows])
         param_display_accordion.set_title(0, "Parameter Display")
         param_display_accordion.selected_index = None
@@ -514,7 +519,7 @@ class EchogramViewerJupyter:
         self.layout = ipywidgets.VBox([
             tab_box,
             self._slot_selector_box,
-            ipywidgets.HBox([self.graphics]),
+            self.graphics,
             controls_row,
             buttons_row,
             self.hover_label,
@@ -522,7 +527,7 @@ class EchogramViewerJupyter:
             param_accordion,
             progress_box,
             self.output,
-        ])
+        ], layout=ipywidgets.Layout(width="100%"))
 
     # =====================================================================
     # Public helpers (forwarded to core)

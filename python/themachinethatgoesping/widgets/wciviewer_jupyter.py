@@ -212,7 +212,7 @@ class WCIViewerJupyter:
         controls = []
         for i in range(n_visible):
             controls.append(
-                ipywidgets.HBox([self._slot_selectors[i], self._ping_sliders[i]])
+                pgh.responsive_row([self._slot_selectors[i], self._ping_sliders[i]])
             )
         self._slot_selector_box.children = controls
 
@@ -226,30 +226,39 @@ class WCIViewerJupyter:
         n_visible = self.core.grid_rows * self.core.grid_cols
 
         slot_controls = [
-            ipywidgets.HBox([self._slot_selectors[i], self._ping_sliders[i]])
+            pgh.responsive_row([self._slot_selectors[i], self._ping_sliders[i]])
             for i in range(n_visible)
         ]
-        slot_box = ipywidgets.VBox(slot_controls)
-        tab_box = ipywidgets.HBox([p.widget("layout")] + self._tab_buttons)
+        slot_box = ipywidgets.VBox(
+            slot_controls, layout=ipywidgets.Layout(width="100%"))
+        tab_box = pgh.responsive_row([p.widget("layout")] + self._tab_buttons)
         settings_tabs = p.build_tabs(WCI_TAB_LAYOUT)
+        settings_tabs.layout.flex = "1 1 380px"
 
-        main_left = ipywidgets.VBox([
-            slot_box,
-            ipywidgets.HBox([p.widget("ref_time"), p.widget("fix_xy"), p.widget("unfix_xy")]),
-            ipywidgets.HBox([p.widget("proctime"), p.widget("procrate")]),
-        ])
+        main_left = ipywidgets.VBox(
+            [
+                slot_box,
+                pgh.responsive_row(
+                    [p.widget("ref_time"), p.widget("fix_xy"), p.widget("unfix_xy")]),
+                pgh.responsive_row([p.widget("proctime"), p.widget("procrate")]),
+            ],
+            layout=ipywidgets.Layout(flex="1 1 480px"),
+        )
 
         progress_box = (
             ipywidgets.HBox([self.progress]) if self.display_progress
             else ipywidgets.HBox([])
         )
 
-        return ipywidgets.VBox([
-            tab_box,
-            ipywidgets.HBox([main_left, settings_tabs]),
-            progress_box,
-            self.hover_label,
-        ])
+        return ipywidgets.VBox(
+            [
+                tab_box,
+                pgh.responsive_row([main_left, settings_tabs], align_items="flex-start"),
+                progress_box,
+                self.hover_label,
+            ],
+            layout=ipywidgets.Layout(width="100%"),
+        )
 
     # =====================================================================
     # Layout assembly
@@ -263,44 +272,53 @@ class WCIViewerJupyter:
         slot_controls = []
         for i in range(n_visible):
             slot_controls.append(
-                ipywidgets.HBox([self._slot_selectors[i], self._ping_sliders[i]])
+                pgh.responsive_row([self._slot_selectors[i], self._ping_sliders[i]])
             )
-        self._slot_selector_box = ipywidgets.VBox(slot_controls)
+        self._slot_selector_box = ipywidgets.VBox(
+            slot_controls, layout=ipywidgets.Layout(width="100%"))
 
         # Tab buttons row
-        tab_box = ipywidgets.HBox([p.widget("layout")] + self._tab_buttons)
+        tab_box = pgh.responsive_row([p.widget("layout")] + self._tab_buttons)
 
         # Tabbed settings
         settings_tabs = p.build_tabs(WCI_TAB_LAYOUT)
+        settings_tabs.layout.flex = "1 1 380px"
 
-        main_left = ipywidgets.VBox([
-            self._slot_selector_box,
-            ipywidgets.HBox([
-                p.widget("ref_time"),
-                p.widget("fix_xy"),
-                p.widget("unfix_xy"),
-            ]),
-            ipywidgets.HBox([
-                p.widget("proctime"),
-                p.widget("procrate"),
-            ]),
-        ])
+        main_left = ipywidgets.VBox(
+            [
+                self._slot_selector_box,
+                pgh.responsive_row([
+                    p.widget("ref_time"),
+                    p.widget("fix_xy"),
+                    p.widget("unfix_xy"),
+                ]),
+                pgh.responsive_row([
+                    p.widget("proctime"),
+                    p.widget("procrate"),
+                ]),
+            ],
+            layout=ipywidgets.Layout(flex="1 1 480px"),
+        )
 
-        main_controls = ipywidgets.HBox([main_left, settings_tabs])
+        main_controls = pgh.responsive_row(
+            [main_left, settings_tabs], align_items="flex-start")
 
         progress_box = (
             ipywidgets.HBox([self.progress]) if self.display_progress
             else ipywidgets.HBox([])
         )
 
-        self.layout = ipywidgets.VBox([
-            ipywidgets.HBox([self.graphics]),
-            progress_box,
-            tab_box,
-            main_controls,
-            self.hover_label,
-            self.output,
-        ])
+        self.layout = ipywidgets.VBox(
+            [
+                self.graphics,
+                progress_box,
+                tab_box,
+                main_controls,
+                self.hover_label,
+                self.output,
+            ],
+            layout=ipywidgets.Layout(width="100%"),
+        )
 
     # =====================================================================
     # Public helpers (forwarded to core)
