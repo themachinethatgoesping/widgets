@@ -20,8 +20,6 @@ import themachinethatgoesping.pingprocessing.watercolumn.image as mi
 
 from .control_spec import (
     ControlPanel,
-    GRID_LAYOUTS,
-    WCI_VALUE_CHOICES,
 )
 from . import pyqtgraph_helpers as pgh
 from .videoframes import VideoFrames
@@ -720,10 +718,10 @@ class WCICore:
             slot.time_offset_text.hide()
             return
         if abs_offset >= self.time_warning_threshold:
-            text = f"\u0394{offset:+.1f}s"
+            text = f"dt {offset:+.1f}s"
             slot.time_offset_text.setColor((200, 60, 60, 220))
         else:
-            text = f"\u0394{offset:+.2f}s"
+            text = f"dt {offset:+.2f}s"
             slot.time_offset_text.setColor((80, 80, 80, 180))
         slot.time_offset_text.setText(text)
         if slot.wci_extent is not None:
@@ -983,7 +981,7 @@ class WCICore:
 
     def stop_autoplay(self) -> None:
         self._autoplay_active = False
-        self.panel["play_button"].description = "\u25b6 Play"
+        self.panel["play_button"].description = "Play"
         self.panel["real_fps"].value = "real: --"
         if self._autoplay_task is not None:
             self._autoplay_task.cancel()
@@ -1482,7 +1480,6 @@ class WCICore:
         return self._get_gfx_view().scene()
 
     def save_scene(self, filename: str = "scene.svg") -> None:
-        import pyqtgraph.exporters
         exporter = pg.exporters.SVGExporter(self.get_scene())
         exporter.export(filename)
 

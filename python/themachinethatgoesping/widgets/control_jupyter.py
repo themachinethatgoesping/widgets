@@ -6,6 +6,7 @@ WCI core can read / write controls without knowing about ipywidgets.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List
 
 import ipywidgets
@@ -31,6 +32,84 @@ from .control_spec import (
 # ---------------------------------------------------------------------------
 # JupyterControlHandle
 # ---------------------------------------------------------------------------
+
+_BUTTON_UNICODE_REPLACEMENTS = {
+    "\u25b6": " ",   # BLACK RIGHT-POINTING TRIANGLE
+    "\u25c0": " ",   # BLACK LEFT-POINTING TRIANGLE
+    "\u25b2": " ",   # BLACK UP-POINTING TRIANGLE
+    "\u25bc": " ",   # BLACK DOWN-POINTING TRIANGLE
+    "\u2192": " ",   # RIGHTWARDS ARROW
+    "\u2190": " ",   # LEFTWARDS ARROW
+    "\u2191": " ",   # UPWARDS ARROW
+    "\u2193": " ",   # DOWNWARDS ARROW
+    "\u21bb": "Refresh",  # CLOCKWISE OPEN CIRCLE ARROW
+}
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _ascii_button_text(text: str) -> str:
+    result = str(text)
+    for src, dst in _BUTTON_UNICODE_REPLACEMENTS.items():
+        result = result.replace(src, dst)
+    result = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in result)
+    return _WHITESPACE_RE.sub(" ", result).strip()
+
+
+def _button_icon_for(name: str | None, text: str) -> str:
+    txt = text.lower()
+
+    if name == "play_button":
+        return "stop" if "stop" in txt else "play"
+
+    name_to_icon = {
+        "step_prev": "backward",
+        "step_next": "forward",
+        "btn_nav_left": "arrow-left",
+        "btn_nav_right": "arrow-right",
+        "btn_nav_up": "arrow-up",
+        "btn_nav_down": "arrow-down",
+        "btn_goto_pingline": "arrow-right",
+        "btn_refresh_params": "refresh",
+        "btn_refresh_param_display": "refresh",
+        "btn_copy_to_all": "share",
+    }
+    if name in name_to_icon:
+        return name_to_icon[name]
+
+    if "refresh" in txt:
+        return "refresh"
+    if "play" in txt:
+        return "play"
+    if "stop" in txt:
+        return "stop"
+    if "prev" in txt:
+        return "backward"
+    if "next" in txt:
+        return "forward"
+    if "left" in txt:
+        return "arrow-left"
+    if "right" in txt:
+        return "arrow-right"
+    if "up" in txt:
+        return "arrow-up"
+    if "down" in txt:
+        return "arrow-down"
+    return ""
+
+
+def _set_button_presentation(button: ipywidgets.Button, description: str,
+                             name: str | None = None) -> None:
+    safe_text = _ascii_button_text(description)
+    if name in {
+        "btn_nav_left", "btn_nav_right", "btn_nav_up", "btn_nav_down",
+        "btn_refresh_params", "btn_refresh_param_display",
+    }:
+        safe_text = ""
+
+    button.description = safe_text
+    button.icon = _button_icon_for(name, safe_text)
+
 
 class JupyterControlHandle(ControlHandle):
     """Wraps a single ipywidgets widget."""
@@ -89,7 +168,10 @@ class JupyterControlHandle(ControlHandle):
 
     @description.setter
     def description(self, v: str) -> None:
-        if hasattr(self._widget, "description"):
+        if isinstance(self._widget, ipywidgets.Button):
+            name = getattr(self._widget, "_control_name", None)
+            _set_button_presentation(self._widget, str(v), name)
+        elif hasattr(self._widget, "description"):
             self._widget.description = v
 
     @property
@@ -163,10 +245,9 @@ def create_jupyter_control(spec: ControlSpecType) -> JupyterControlHandle:
             layout=ipywidgets.Layout(width=spec.width),
         )
     elif isinstance(spec, ButtonSpec):
-        w = ipywidgets.Button(
-            description=spec.description, tooltip=spec.tooltip,
-            layout=ipywidgets.Layout(width=spec.width),
-        )
+        w = ipywidgets.Button(tooltip=spec.tooltip, layout=ipywidgets.Layout(width=spec.width))
+        w._control_name = spec.name
+        _set_button_presentation(w, spec.description, spec.name)
     elif isinstance(spec, LabelSpec):
         w = ipywidgets.Label(
             value=spec.value,

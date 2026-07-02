@@ -8,7 +8,7 @@ widgets.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Sequence, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +428,7 @@ ECHO_PARAM_SPECS: List[ControlSpecType] = [
     HTMLSpec("param_status", ""),
     HTMLSpec("param_help",
              "<small>Drag points to move | <b>Click plot, then A</b>=add point | "
-             "<b>Del/Backspace</b>=delete nearest point | <b>✏ per view</b>=toggle editing</small>"),
+             "<b>Del/Backspace</b>=delete nearest point | <b>Edit per view</b>=toggle editing</small>"),
 ]
 
 # -- Parameter display controls (read-only overlay of a ping param on the

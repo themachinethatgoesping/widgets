@@ -14,7 +14,6 @@ Usage::
 from __future__ import annotations
 
 import threading
-import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -127,10 +126,10 @@ class EchogramViewerQt(QtWidgets.QMainWindow):
             # Interactive-editing toggle for this view.  Default on (every view
             # is editable).  Connected *after* setChecked so it doesn't fire
             # before the core exists; the handler is also guarded below.
-            chk = QtWidgets.QCheckBox("\u270f")
+            chk = QtWidgets.QCheckBox("Edit")
             chk.setChecked(True)
             chk.setToolTip(
-                "Interactive parameter editing on this view \u2014 "
+                "Interactive parameter editing on this view - "
                 "uncheck to pan/zoom without grabbing points")
             chk.toggled.connect(
                 lambda checked, idx=i: self._on_slot_interactive_toggled(idx, checked))
