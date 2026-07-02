@@ -6,9 +6,10 @@ them in :class:`ControlHandle` / :class:`ControlPanel` objects so
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List
 
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from .control_spec import (
     ButtonSpec,
@@ -156,7 +157,8 @@ class QtControlHandle(ControlHandle):
     def description(self, v: str) -> None:
         w = self._inner
         if isinstance(w, QtWidgets.QPushButton):
-            w.setText(v)
+            name = w.property("control_name")
+            _set_button_presentation(w, str(v), str(name) if name is not None else None)
 
     @property
     def disabled(self) -> bool:
@@ -239,6 +241,102 @@ QSlider::sub-page:horizontal {
     border-radius: 4px;
 }
 """
+
+
+# ---------------------------------------------------------------------------
+# Robust button text/icon helpers
+# ---------------------------------------------------------------------------
+
+_BUTTON_UNICODE_REPLACEMENTS = {
+    "\u25b6": " ",   # BLACK RIGHT-POINTING TRIANGLE
+    "\u25c0": " ",   # BLACK LEFT-POINTING TRIANGLE
+    "\u25b2": " ",   # BLACK UP-POINTING TRIANGLE
+    "\u25bc": " ",   # BLACK DOWN-POINTING TRIANGLE
+    "\u2192": " ",   # RIGHTWARDS ARROW
+    "\u2190": " ",   # LEFTWARDS ARROW
+    "\u2191": " ",   # UPWARDS ARROW
+    "\u2193": " ",   # DOWNWARDS ARROW
+    "\u21bb": "Refresh",  # CLOCKWISE OPEN CIRCLE ARROW
+}
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _ascii_button_text(text: str) -> str:
+    """Convert button text to ASCII-safe text with graceful replacements."""
+    result = str(text)
+    for src, dst in _BUTTON_UNICODE_REPLACEMENTS.items():
+        result = result.replace(src, dst)
+
+    # Keep printable ASCII only (font rendering in some stacks crashes on
+    # non-ASCII glyph fallback inside QPushButton size calculations).
+    result = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in result)
+    result = _WHITESPACE_RE.sub(" ", result).strip()
+    return result
+
+
+def _button_icon_for(name: str | None, text: str) -> QtWidgets.QStyle.StandardPixmap | None:
+    """Return a style-native icon for known controls/text semantics."""
+    txt = text.lower()
+
+    if name == "play_button":
+        if "stop" in txt:
+            return QtWidgets.QStyle.StandardPixmap.SP_MediaStop
+        return QtWidgets.QStyle.StandardPixmap.SP_MediaPlay
+
+    name_to_icon: Dict[str, QtWidgets.QStyle.StandardPixmap] = {
+        "step_prev": QtWidgets.QStyle.StandardPixmap.SP_MediaSeekBackward,
+        "step_next": QtWidgets.QStyle.StandardPixmap.SP_MediaSeekForward,
+        "btn_nav_left": QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft,
+        "btn_nav_right": QtWidgets.QStyle.StandardPixmap.SP_ArrowRight,
+        "btn_nav_up": QtWidgets.QStyle.StandardPixmap.SP_ArrowUp,
+        "btn_nav_down": QtWidgets.QStyle.StandardPixmap.SP_ArrowDown,
+        "btn_goto_pingline": QtWidgets.QStyle.StandardPixmap.SP_ArrowRight,
+        "btn_refresh_params": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
+    }
+    if name in name_to_icon:
+        return name_to_icon[name]
+
+    if "refresh" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_BrowserReload
+    if "play" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_MediaPlay
+    if "stop" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_MediaStop
+    if "prev" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_MediaSeekBackward
+    if "next" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_MediaSeekForward
+    if "left" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft
+    if "right" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_ArrowRight
+    if "up" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_ArrowUp
+    if "down" in txt:
+        return QtWidgets.QStyle.StandardPixmap.SP_ArrowDown
+    return None
+
+
+def _set_button_presentation(button: QtWidgets.QPushButton, description: str,
+                             name: str | None = None) -> None:
+    """Apply ASCII-safe text + style icon so controls stay nice and robust."""
+    safe_text = _ascii_button_text(description)
+
+    # Compact arrow-only nav controls: keep icon-only for a clean look.
+    if name in {
+        "btn_nav_left", "btn_nav_right", "btn_nav_up", "btn_nav_down",
+        "btn_refresh_params",
+    }:
+        safe_text = ""
+
+    button.setText(safe_text)
+
+    icon_kind = _button_icon_for(name, safe_text)
+    if icon_kind is None:
+        button.setIcon(QtGui.QIcon())
+    else:
+        button.setIcon(button.style().standardIcon(icon_kind))
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +505,9 @@ def create_qt_control(spec: ControlSpecType) -> QtControlHandle:
         )
 
     if isinstance(spec, ButtonSpec):
-        w = QtWidgets.QPushButton(spec.description)
+        w = QtWidgets.QPushButton()
+        w.setProperty("control_name", spec.name)
+        _set_button_presentation(w, spec.description, spec.name)
         if spec.tooltip:
             w.setToolTip(spec.tooltip)
         return QtControlHandle(
