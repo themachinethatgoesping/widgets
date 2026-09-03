@@ -92,7 +92,7 @@ def _get_colormap_lut(name: str, n_colors: int = 256) -> np.ndarray:
 @dataclass
 class LayerRenderSettings:
     """Viewer-side rendering settings for a layer."""
-    colormap: str = "viridis"
+    colormap: str = "gray"
     opacity: float = 1.0
     vmin: Optional[float] = None
     vmax: Optional[float] = None
@@ -213,6 +213,7 @@ class MapCore:
         self._colorbar_item: Optional[pg.ColorBarItem] = None
         self._active_colorbar_layer: Optional[str] = None
         self._layer_colorbar_levels: Dict[str, Tuple[float, float]] = {}
+        self._suppress_colorbar_feedback: bool = False
 
         # Tile cache key (for avoiding redundant loads)
         self._tile_cache_key: Optional[Tuple] = None
@@ -240,6 +241,7 @@ class MapCore:
         self._trigger_tile_load: Optional[Callable] = None
         self._report_error: Optional[Callable] = None
         self._update_track_legend: Optional[Callable] = None
+        self._on_layer_levels_changed: Optional[Callable] = None
 
         # Ignore range changes flag (used during programmatic pan/zoom)
         self._ignore_range_changes = False
@@ -274,7 +276,60 @@ class MapCore:
             return
         for layer in self._builder.layers:
             if layer.name not in self._layer_render_settings:
-                self._layer_render_settings[layer.name] = LayerRenderSettings()
+                self._init_layer_defaults(layer.name)
+
+    def _compute_layer_quantiles(
+        self, layer_name: str, qlow: float = 1.0, qhigh: float = 99.0
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Return the (qlow, qhigh) percentiles of a layer over its full extent."""
+        if self._builder is None:
+            return None, None
+        try:
+            result = self._builder.get_layer_data(
+                layer_name, bounds=None, max_size=(512, 512)
+            )
+        except Exception:
+            return None, None
+        if result is None:
+            return None, None
+        data, _ = result
+        finite = data[np.isfinite(data)]
+        if finite.size == 0:
+            return None, None
+        lo = float(np.percentile(finite, qlow))
+        hi = float(np.percentile(finite, qhigh))
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            return None, None
+        return lo, hi
+
+    def _init_layer_defaults(
+        self,
+        layer_name: str,
+        cmap: Optional[str] = None,
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+    ) -> None:
+        """Create default render settings for a layer.
+
+        The colormap is set from *cmap* when given. Any of *vmin* / *vmax* left
+        as None defaults to the full data min / max (a linear stretch), giving
+        a fixed value range that does not rescale when zooming.
+        """
+        settings = self._layer_render_settings.setdefault(
+            layer_name, LayerRenderSettings()
+        )
+        if cmap is not None:
+            settings.colormap = cmap
+        if vmin is None or vmax is None:
+            qlo, qhi = self._compute_layer_quantiles(layer_name, 0.0, 100.0)
+            if vmin is None:
+                vmin = qlo
+            if vmax is None:
+                vmax = qhi
+        if vmin is not None and vmax is not None:
+            settings.vmin = vmin
+            settings.vmax = vmax
+            self._layer_colorbar_levels[layer_name] = (vmin, vmax)
 
     def _build_scene(self) -> None:
         """Create pyqtgraph plot and items."""
@@ -317,7 +372,7 @@ class MapCore:
             self._colorbar_item = pg.ColorBarItem(
                 interactive=True,
                 orientation='vertical',
-                colorMap=pg.colormap.get('viridis'),
+                colorMap=pg.colormap.get('viridis'),  # placeholder; _update_colorbar sets the real one
                 width=15,
             )
             self.graphics.addItem(self._colorbar_item, row=0, col=1)
@@ -343,44 +398,61 @@ class MapCore:
             self._colorbar_item.hide()
             return
 
-        self._colorbar_item.show()
-        if layer_name in self._layer_images:
-            self._colorbar_item.setImageItem(self._layer_images[layer_name])
-
         settings = self._layer_render_settings.get(layer_name, LayerRenderSettings())
 
-        try:
-            cmap = pg.colormap.get(settings.colormap, source='matplotlib')
-            self._colorbar_item.setColorMap(cmap)
-        except Exception as e:
-            warnings.warn(f"Could not set colorbar colormap: {e}")
-
-        if layer_name in self._layer_colorbar_levels:
-            vmin, vmax = self._layer_colorbar_levels[layer_name]
-            self._colorbar_item.setLevels((vmin, vmax))
-        else:
+        # Resolve the intended levels BEFORE (re)linking the image: linking a
+        # freshly created ColorBarItem can emit its default (0, 1) levels and
+        # clobber the real ones through the sigLevelsChanged handler.
+        levels = self._layer_colorbar_levels.get(layer_name)
+        if levels is None:
             vmin = settings.vmin
             vmax = settings.vmax
-            if vmin is None or vmax is None:
-                if self._builder is not None:
-                    result = self._builder.get_layer_data(layer_name, max_size=(100, 100))
-                    if result is not None:
-                        data, _ = result
-                        if vmin is None:
-                            vmin = float(np.nanmin(data))
-                        if vmax is None:
-                            vmax = float(np.nanmax(data))
+            if (vmin is None or vmax is None) and self._builder is not None:
+                result = self._builder.get_layer_data(layer_name, max_size=(100, 100))
+                if result is not None:
+                    data, _ = result
+                    if vmin is None:
+                        vmin = float(np.nanmin(data))
+                    if vmax is None:
+                        vmax = float(np.nanmax(data))
             if vmin is not None and vmax is not None:
-                self._colorbar_item.setLevels((vmin, vmax))
-                self._layer_colorbar_levels[layer_name] = (vmin, vmax)
+                levels = (vmin, vmax)
+
+        self._colorbar_item.show()
+        self._suppress_colorbar_feedback = True
+        try:
+            if layer_name in self._layer_images:
+                self._colorbar_item.setImageItem(self._layer_images[layer_name])
+
+            try:
+                cmap = pg.colormap.get(settings.colormap, source='matplotlib')
+                self._colorbar_item.setColorMap(cmap)
+            except Exception as e:
+                warnings.warn(f"Could not set colorbar colormap: {e}")
+
+            if levels is not None:
+                self._layer_colorbar_levels[layer_name] = levels
+                self._colorbar_item.setLevels(levels)
+                if layer_name in self._layer_images:
+                    self._layer_images[layer_name].setLevels(levels)
+        finally:
+            self._suppress_colorbar_feedback = False
 
     def _on_colorbar_levels_changed(self, colorbar) -> None:
         """Handle colorbar level change from user interaction."""
+        if self._suppress_colorbar_feedback:
+            return
         layer_name = self._active_colorbar_layer
         if layer_name is None:
             return
         vmin, vmax = colorbar.levels()
         self._layer_colorbar_levels[layer_name] = (vmin, vmax)
+        settings = self._layer_render_settings.get(layer_name)
+        if settings is not None:
+            settings.vmin = vmin
+            settings.vmax = vmax
+        if self._on_layer_levels_changed is not None:
+            self._on_layer_levels_changed(layer_name, vmin, vmax)
 
     def _get_layer_levels(self, layer_name: str, data: np.ndarray) -> Tuple[float, float]:
         """Get rendering levels for a layer."""
@@ -402,7 +474,7 @@ class MapCore:
     def on_colorbar_layer_change(self, layer_name: Optional[str]) -> None:
         """Handle colorbar layer selection change."""
         old_layer = self._active_colorbar_layer
-        if old_layer and self._colorbar_item is not None:
+        if old_layer and old_layer != layer_name and self._colorbar_item is not None:
             try:
                 vmin, vmax = self._colorbar_item.levels()
                 self._layer_colorbar_levels[old_layer] = (vmin, vmax)
@@ -435,14 +507,25 @@ class MapCore:
                 self._render_layer(layer)
 
     def set_layer_range(self, layer_name: str, vmin: float, vmax: float) -> None:
-        if layer_name not in self._layer_render_settings:
-            self._layer_render_settings[layer_name] = LayerRenderSettings()
-        self._layer_render_settings[layer_name].vmin = vmin
-        self._layer_render_settings[layer_name].vmax = vmax
-        if self._builder is not None:
-            layer = self._builder.get_layer(layer_name)
-            if layer:
-                self._render_layer(layer)
+        self.set_layer_levels(layer_name, vmin, vmax)
+
+    def set_layer_levels(self, layer_name: str, vmin: float, vmax: float) -> None:
+        """Set a fixed display range for a layer (no auto-rescale on zoom)."""
+        settings = self._layer_render_settings.setdefault(
+            layer_name, LayerRenderSettings()
+        )
+        settings.vmin = vmin
+        settings.vmax = vmax
+        self._layer_colorbar_levels[layer_name] = (vmin, vmax)
+        if layer_name in self._layer_images:
+            self._layer_images[layer_name].setLevels((vmin, vmax))
+        if (layer_name == self._active_colorbar_layer
+                and self._colorbar_item is not None):
+            try:
+                self._colorbar_item.setLevels((vmin, vmax))
+            except Exception:
+                pass
+        self._do_request_draw()
 
     def set_layer_blend_mode(self, layer_name: str, blend_mode: str) -> None:
         if layer_name not in self._layer_render_settings:
@@ -697,7 +780,9 @@ class MapCore:
     # Add layers after construction
     # =====================================================================
 
-    def add_geotiff(self, path: str, name: Optional[str] = None, band: int = 1, **kwargs) -> None:
+    def add_geotiff(self, path: str, name: Optional[str] = None, band: int = 1,
+                    cmap: Optional[str] = None, vmin: Optional[float] = None,
+                    vmax: Optional[float] = None, **kwargs) -> None:
         from themachinethatgoesping.pingprocessing.overview.map_builder import MapBuilder
 
         if self._builder is None:
@@ -705,14 +790,15 @@ class MapCore:
 
         self._builder.add_geotiff(path, name=name, band=band, **kwargs)
         added_layer = self._builder.layers[-1]
-        if added_layer.name not in self._layer_render_settings:
-            self._layer_render_settings[added_layer.name] = LayerRenderSettings()
+        self._init_layer_defaults(added_layer.name, cmap=cmap, vmin=vmin, vmax=vmax)
 
         self._current_bounds = None
         self.update_view()
 
     def add_layer(self, backend: Any, name: Optional[str] = None,
-                  visible: bool = True, z_order: Optional[int] = None) -> None:
+                  visible: bool = True, z_order: Optional[int] = None,
+                  cmap: Optional[str] = None, vmin: Optional[float] = None,
+                  vmax: Optional[float] = None) -> None:
         from themachinethatgoesping.pingprocessing.overview.map_builder import MapBuilder
 
         if self._builder is None:
@@ -720,8 +806,7 @@ class MapCore:
 
         self._builder.add_layer(backend, name=name, visible=visible, z_order=z_order)
         added_layer = self._builder.layers[-1]
-        if added_layer.name not in self._layer_render_settings:
-            self._layer_render_settings[added_layer.name] = LayerRenderSettings()
+        self._init_layer_defaults(added_layer.name, cmap=cmap, vmin=vmin, vmax=vmax)
 
         self._current_bounds = None
         self.update_view()

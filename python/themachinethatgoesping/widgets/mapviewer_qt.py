@@ -113,6 +113,7 @@ class MapViewerQt(QtWidgets.QMainWindow):
         self.core._request_draw = lambda: None  # native Qt repaints automatically
         self.core._trigger_tile_load = self._trigger_tile_load
         self.core._report_error = lambda msg: print(msg)
+        self.core._on_layer_levels_changed = self._sync_level_spinboxes_qt
 
         # Wire observers
         self.core.wire_observers()
@@ -139,6 +140,10 @@ class MapViewerQt(QtWidgets.QMainWindow):
         self._layer_checkboxes_qt: Dict[str, QtWidgets.QCheckBox] = {}
         self._layer_sliders_qt: Dict[str, QtWidgets.QSlider] = {}
         self._layer_colormap_combos: Dict[str, QtWidgets.QComboBox] = {}
+        self._layer_vmin_spin_qt: Dict[str, QtWidgets.QDoubleSpinBox] = {}
+        self._layer_vmax_spin_qt: Dict[str, QtWidgets.QDoubleSpinBox] = {}
+        self._layer_rows_qt: Dict[str, QtWidgets.QWidget] = {}
+        self._layers_rows_layout: Optional[QtWidgets.QVBoxLayout] = None
 
         # Build layer/tile controls (needed by both dock layout and build_control_widget)
         self._build_layer_tile_controls(builder, tile_builder)
@@ -379,45 +384,145 @@ class MapViewerQt(QtWidgets.QMainWindow):
 
         if builder is not None:
             for layer in builder.layers:
-                settings = self.core._layer_render_settings.get(layer.name, LayerRenderSettings())
+                self._add_layer_row_qt(layer.name)
+            self._refresh_colorbar_dropdown_qt()
 
-                cb = QtWidgets.QCheckBox(layer.name)
-                cb.setChecked(layer.visible)
-                cb.toggled.connect(lambda checked, n=layer.name: self.core.set_layer_visibility(n, checked))
-                self._layer_checkboxes_qt[layer.name] = cb
+    def _add_layer_row_qt(self, layer_name: str) -> QtWidgets.QWidget:
+        """Create the control row (visibility, opacity, colormap, min/max) for a layer."""
+        if layer_name in self._layer_rows_qt:
+            return self._layer_rows_qt[layer_name]
 
-                slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-                slider.setRange(0, 100)
-                slider.setValue(int(settings.opacity * 100))
-                slider.setFixedWidth(80)
-                slider.valueChanged.connect(
-                    lambda val, n=layer.name: self.core.set_layer_opacity_image(n, val / 100.0)
-                )
-                self._layer_sliders_qt[layer.name] = slider
+        settings = self.core._layer_render_settings.get(layer_name, LayerRenderSettings())
 
-                cmap_combo = QtWidgets.QComboBox()
-                for cm in MAP_COLORMAPS:
-                    cmap_combo.addItem(cm)
-                idx = cmap_combo.findText(settings.colormap)
-                if idx >= 0:
-                    cmap_combo.setCurrentIndex(idx)
-                cmap_combo.currentTextChanged.connect(
-                    lambda text, n=layer.name: self.core.set_layer_colormap_image(n, text)
-                )
-                self._layer_colormap_combos[layer.name] = cmap_combo
+        cb = QtWidgets.QCheckBox(layer_name)
+        cb.setChecked(True)
+        cb.toggled.connect(lambda checked, n=layer_name: self.core.set_layer_visibility(n, checked))
+        self._layer_checkboxes_qt[layer_name] = cb
 
-            # Update colorbar dropdown options
-            layer_names = [l.name for l in builder.layers]
-            if layer_names and "colorbar_layer" in self.panel:
-                handle = self.panel["colorbar_layer"]
-                w = handle.widget
-                if isinstance(w, QtWidgets.QComboBox):
-                    w.clear()
-                    w.addItem("None", None)
-                    for n in layer_names:
-                        w.addItem(n, n)
-                    w.setCurrentIndex(1)
-                    self.core._active_colorbar_layer = layer_names[0]
+        slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(int(settings.opacity * 100))
+        slider.setFixedWidth(70)
+        slider.valueChanged.connect(
+            lambda val, n=layer_name: self.core.set_layer_opacity_image(n, val / 100.0)
+        )
+        self._layer_sliders_qt[layer_name] = slider
+
+        cmap_combo = QtWidgets.QComboBox()
+        for cm in MAP_COLORMAPS:
+            cmap_combo.addItem(cm)
+        if settings.colormap and cmap_combo.findText(settings.colormap) < 0:
+            cmap_combo.addItem(settings.colormap)
+        idx = cmap_combo.findText(settings.colormap)
+        if idx >= 0:
+            cmap_combo.setCurrentIndex(idx)
+        cmap_combo.currentTextChanged.connect(
+            lambda text, n=layer_name: self.core.set_layer_colormap_image(n, text)
+        )
+        self._layer_colormap_combos[layer_name] = cmap_combo
+
+        vmin_spin = QtWidgets.QDoubleSpinBox()
+        vmax_spin = QtWidgets.QDoubleSpinBox()
+        for spin, tip in (
+            (vmin_spin, "Fixed minimum value (does not rescale on zoom)"),
+            (vmax_spin, "Fixed maximum value (does not rescale on zoom)"),
+        ):
+            spin.setDecimals(2)
+            spin.setRange(-1e9, 1e9)
+            spin.setSingleStep(1.0)
+            spin.setFixedWidth(80)
+            spin.setKeyboardTracking(False)
+            spin.setToolTip(tip)
+
+        vmin_spin.blockSignals(True)
+        vmax_spin.blockSignals(True)
+        if settings.vmin is not None:
+            vmin_spin.setValue(settings.vmin)
+        if settings.vmax is not None:
+            vmax_spin.setValue(settings.vmax)
+        vmin_spin.blockSignals(False)
+        vmax_spin.blockSignals(False)
+
+        vmin_spin.valueChanged.connect(lambda _val, n=layer_name: self._on_level_spin_changed_qt(n))
+        vmax_spin.valueChanged.connect(lambda _val, n=layer_name: self._on_level_spin_changed_qt(n))
+        self._layer_vmin_spin_qt[layer_name] = vmin_spin
+        self._layer_vmax_spin_qt[layer_name] = vmax_spin
+
+        row_widget = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(row_widget)
+        row.setContentsMargins(2, 1, 2, 1)
+        row.addWidget(cb)
+        row.addWidget(slider)
+        row.addWidget(cmap_combo)
+        row.addWidget(QtWidgets.QLabel("min"))
+        row.addWidget(vmin_spin)
+        row.addWidget(QtWidgets.QLabel("max"))
+        row.addWidget(vmax_spin)
+        row.addStretch()
+        self._layer_rows_qt[layer_name] = row_widget
+        return row_widget
+
+    def _on_level_spin_changed_qt(self, layer_name: str) -> None:
+        """Apply a fixed min/max entered in the layer spinboxes."""
+        lo = self._layer_vmin_spin_qt[layer_name].value()
+        hi = self._layer_vmax_spin_qt[layer_name].value()
+        self.core.set_layer_levels(layer_name, lo, hi)
+
+    def _sync_level_spinboxes_qt(self, layer_name: str, vmin: float, vmax: float) -> None:
+        """Reflect an externally changed range (e.g. colorbar drag) in the spinboxes."""
+        lo = self._layer_vmin_spin_qt.get(layer_name)
+        hi = self._layer_vmax_spin_qt.get(layer_name)
+        if lo is not None:
+            lo.blockSignals(True)
+            lo.setValue(vmin)
+            lo.blockSignals(False)
+        if hi is not None:
+            hi.blockSignals(True)
+            hi.setValue(vmax)
+            hi.blockSignals(False)
+
+    def _refresh_colorbar_dropdown_qt(self) -> None:
+        """Repopulate the colorbar-layer dropdown from the current builder layers."""
+        if "colorbar_layer" not in self.panel or self.core._builder is None:
+            return
+        layer_names = [layer.name for layer in self.core._builder.layers]
+        handle = self.panel["colorbar_layer"]
+        current = self.core._active_colorbar_layer
+        target = current if current in layer_names else (layer_names[0] if layer_names else None)
+
+        inner = getattr(handle, "_inner", None)
+        if inner is not None:
+            inner.blockSignals(True)
+        try:
+            handle.options = [("None", None)] + [(n, n) for n in layer_names]
+        finally:
+            if inner is not None:
+                inner.blockSignals(False)
+
+        if target is not None:
+            self.core._active_colorbar_layer = target
+            handle.value = target
+
+    def _ensure_layer_rows_qt(self) -> None:
+        """Create control rows for any builder layers that don't have one yet."""
+        if self.core._builder is None:
+            return
+        for layer in self.core._builder.layers:
+            if layer.name not in self._layer_rows_qt:
+                self._add_layer_row_qt(layer.name)
+
+    def _sync_layer_controls_qt(self) -> None:
+        """Add GUI controls + colorbar entry for layers added after construction."""
+        if self.core._builder is None:
+            return
+        for layer in self.core._builder.layers:
+            if layer.name not in self._layer_rows_qt:
+                row = self._add_layer_row_qt(layer.name)
+                if self._layers_rows_layout is not None:
+                    insert_at = max(0, self._layers_rows_layout.count() - 1)
+                    self._layers_rows_layout.insertWidget(insert_at, row)
+        self._refresh_colorbar_dropdown_qt()
+        self.core.create_colorbar()
 
     # =====================================================================
     # DockArea layout
@@ -467,13 +572,9 @@ class MapViewerQt(QtWidgets.QMainWindow):
             tile_row.addStretch()
             layers_vlayout.addLayout(tile_row)
 
-        for layer_name in self._layer_checkboxes_qt:
-            row = QtWidgets.QHBoxLayout()
-            row.addWidget(self._layer_checkboxes_qt[layer_name])
-            row.addWidget(self._layer_sliders_qt[layer_name])
-            row.addWidget(self._layer_colormap_combos[layer_name])
-            row.addStretch()
-            layers_vlayout.addLayout(row)
+        self._layers_rows_layout = layers_vlayout
+        for layer_name in list(self._layer_rows_qt.keys()):
+            layers_vlayout.addWidget(self._layer_rows_qt[layer_name])
 
         layers_vlayout.addStretch()
         d_layers.addWidget(layers_widget)
@@ -566,13 +667,10 @@ class MapViewerQt(QtWidgets.QMainWindow):
             layout.addLayout(tile_row)
 
         # Layer controls
-        for layer_name in self._layer_checkboxes_qt:
-            row = QtWidgets.QHBoxLayout()
-            row.addWidget(self._layer_checkboxes_qt[layer_name])
-            row.addWidget(self._layer_sliders_qt[layer_name])
-            row.addWidget(self._layer_colormap_combos[layer_name])
-            row.addStretch()
-            layout.addLayout(row)
+        self._ensure_layer_rows_qt()
+        self._refresh_colorbar_dropdown_qt()
+        for layer_name in list(self._layer_rows_qt.keys()):
+            layout.addWidget(self._layer_rows_qt[layer_name])
 
         # Track legend
         layout.addWidget(self._track_scroll)
@@ -658,7 +756,8 @@ class MapViewerQt(QtWidgets.QMainWindow):
         return self
 
     def set_layer_range(self, layer_name: str, vmin: float, vmax: float) -> "MapViewerQt":
-        self.core.set_layer_range(layer_name, vmin, vmax)
+        self.core.set_layer_levels(layer_name, vmin, vmax)
+        self._sync_level_spinboxes_qt(layer_name, vmin, vmax)
         return self
 
     def set_layer_blend_mode(self, layer_name: str, blend_mode: str) -> "MapViewerQt":
@@ -692,11 +791,13 @@ class MapViewerQt(QtWidgets.QMainWindow):
 
     def add_geotiff(self, path: str, name: Optional[str] = None, band: int = 1, **kwargs) -> "MapViewerQt":
         self.core.add_geotiff(path, name=name, band=band, **kwargs)
+        self._sync_layer_controls_qt()
         return self
 
     def add_layer(self, backend: Any, name: Optional[str] = None,
-                  visible: bool = True, z_order: Optional[int] = None) -> "MapViewerQt":
-        self.core.add_layer(backend, name=name, visible=visible, z_order=z_order)
+                  visible: bool = True, z_order: Optional[int] = None, **kwargs) -> "MapViewerQt":
+        self.core.add_layer(backend, name=name, visible=visible, z_order=z_order, **kwargs)
+        self._sync_layer_controls_qt()
         return self
 
     def add_track(self, latitudes, longitudes, name: str = "Track",

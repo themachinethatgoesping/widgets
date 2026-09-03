@@ -132,6 +132,10 @@ class MapViewerJupyter:
         self._layer_checkboxes: Dict[str, ipywidgets.Checkbox] = {}
         self._layer_sliders: Dict[str, ipywidgets.FloatSlider] = {}
         self._layer_colormap_dropdowns: Dict[str, ipywidgets.Dropdown] = {}
+        self._layer_vmin_texts: Dict[str, ipywidgets.FloatText] = {}
+        self._layer_vmax_texts: Dict[str, ipywidgets.FloatText] = {}
+        self._syncing_levels = False
+        self.core._on_layer_levels_changed = self._sync_level_texts
         self._build_layer_controls()
 
         # Build tile controls
@@ -208,6 +212,29 @@ class MapViewerJupyter:
             )
             self._layer_colormap_dropdowns[layer.name] = cmap_dropdown
 
+            vmin_text = ipywidgets.FloatText(
+                value=settings.vmin if settings.vmin is not None else 0.0,
+                description='min', continuous_update=False,
+                layout=ipywidgets.Layout(width='120px'),
+                style={'description_width': '28px'},
+            )
+            vmax_text = ipywidgets.FloatText(
+                value=settings.vmax if settings.vmax is not None else 0.0,
+                description='max', continuous_update=False,
+                layout=ipywidgets.Layout(width='120px'),
+                style={'description_width': '28px'},
+            )
+            vmin_text.observe(
+                lambda change, name=layer.name: self._on_level_text_change(name),
+                names='value',
+            )
+            vmax_text.observe(
+                lambda change, name=layer.name: self._on_level_text_change(name),
+                names='value',
+            )
+            self._layer_vmin_texts[layer.name] = vmin_text
+            self._layer_vmax_texts[layer.name] = vmax_text
+
         # Update colorbar layer dropdown
         colorbar_options = [("None", None)] + [(n, n) for n in layer_names]
         self.panel["colorbar_layer"].widget.options = colorbar_options
@@ -255,8 +282,29 @@ class MapViewerJupyter:
         self._layer_checkboxes.clear()
         self._layer_sliders.clear()
         self._layer_colormap_dropdowns.clear()
+        self._layer_vmin_texts.clear()
+        self._layer_vmax_texts.clear()
         self._build_layer_controls()
         self._assemble_layout()
+
+    def _on_level_text_change(self, layer_name: str) -> None:
+        """Apply a fixed min/max entered in the layer text boxes."""
+        if self._syncing_levels:
+            return
+        lo = self._layer_vmin_texts[layer_name].value
+        hi = self._layer_vmax_texts[layer_name].value
+        self.core.set_layer_levels(layer_name, lo, hi)
+
+    def _sync_level_texts(self, layer_name: str, vmin: float, vmax: float) -> None:
+        """Reflect an externally changed range (e.g. colorbar drag) in the text boxes."""
+        self._syncing_levels = True
+        try:
+            if layer_name in self._layer_vmin_texts:
+                self._layer_vmin_texts[layer_name].value = vmin
+            if layer_name in self._layer_vmax_texts:
+                self._layer_vmax_texts[layer_name].value = vmax
+        finally:
+            self._syncing_levels = False
 
     # =====================================================================
     # Tile callbacks
@@ -554,6 +602,8 @@ class MapViewerJupyter:
                         self._layer_checkboxes[layer.name],
                         self._layer_sliders[layer.name],
                         self._layer_colormap_dropdowns[layer.name],
+                        self._layer_vmin_texts[layer.name],
+                        self._layer_vmax_texts[layer.name],
                     ]))
             if layer_widgets:
                 parts.append(ipywidgets.HTML("<b>Data Layers</b>"))
@@ -589,6 +639,8 @@ class MapViewerJupyter:
                         self._layer_checkboxes[layer.name],
                         self._layer_sliders[layer.name],
                         self._layer_colormap_dropdowns[layer.name],
+                        self._layer_vmin_texts[layer.name],
+                        self._layer_vmax_texts[layer.name],
                     ]))
 
         controls_list = []
@@ -662,7 +714,8 @@ class MapViewerJupyter:
         return self
 
     def set_layer_range(self, layer_name: str, vmin: float, vmax: float) -> "MapViewerJupyter":
-        self.core.set_layer_range(layer_name, vmin, vmax)
+        self.core.set_layer_levels(layer_name, vmin, vmax)
+        self._sync_level_texts(layer_name, vmin, vmax)
         return self
 
     def set_layer_blend_mode(self, layer_name: str, blend_mode: str) -> "MapViewerJupyter":
