@@ -167,6 +167,14 @@ class MapCore:
         max_render_size: Tuple[int, int] = (2000, 2000),
     ) -> None:
         self._builder = builder
+        # Always provide a tile builder so the tile-source control is available in the GUI.
+        # No tiles are shown or downloaded until a source is activated (GUI or code).
+        if tile_builder is None:
+            try:
+                from themachinethatgoesping.pingprocessing.overview.map_builder import TileBuilder
+                tile_builder = TileBuilder()
+            except Exception:
+                tile_builder = None
         self._tile_builder = tile_builder
         self._panel = panel
         self.graphics = graphics
@@ -182,7 +190,16 @@ class MapCore:
 
         # Tile background layer
         self._tile_image: Optional[pg.ImageItem] = None
-        self._tile_visible: bool = True if tile_builder else False
+        # Only show tiles at startup if the provided builder already has an active source.
+        self._tile_visible: bool = bool(
+            tile_builder is not None and getattr(tile_builder, "visible_sources", [])
+        )
+        # Tile source stack (base + optional overlay) + acquisition-date state
+        _active_layers = getattr(tile_builder, "active_layer_names", []) if tile_builder else []
+        self._tile_base_name: Optional[str] = _active_layers[0] if _active_layers else None
+        self._tile_overlay_name: Optional[str] = _active_layers[1] if len(_active_layers) > 1 else None
+        self._tile_time_from_data: bool = False
+        self._current_ping_time: Optional[float] = None
 
         # Track overlays
         self._tracks: Dict[str, TrackInfo] = {}
@@ -565,31 +582,99 @@ class MapCore:
             self.render_tiles()
 
     def change_tile_source(self, source_name: str) -> None:
-        """Change the tile source by name."""
+        """Set the base tile source by name ('None' hides tiles)."""
+        self._tile_base_name = None if source_name in (None, 'None') else source_name
+        self._apply_tile_layers()
+
+    def change_tile_overlay(self, source_name: str) -> None:
+        """Set the optional overlay (second) layer by name ('None' = no overlay)."""
+        self._tile_overlay_name = None if source_name in (None, 'None') else source_name
+        self._apply_tile_layers()
+
+    def _apply_tile_layers(self) -> None:
+        """Apply the base + overlay stack to the tile builder and re-render."""
         if self._tile_builder is None:
             return
-
-        if source_name == 'None':
-            self._tile_visible = False
-            if self._tile_image is not None:
-                self._tile_image.setVisible(False)
-            return
-
         try:
-            if source_name not in self._tile_builder.source_names:
-                self._tile_builder.add_preset(source_name)
-            for name in self._tile_builder.source_names:
-                self._tile_builder.set_source_visible(name, name == source_name)
+            names = [n for n in (self._tile_base_name, self._tile_overlay_name) if n]
+            self._tile_builder.set_layers(names)
             self._tile_cache_key = None
-            self._tile_visible = True
-            self.render_tiles()
+            self._tile_visible = bool(self._tile_base_name)
+            if self._tile_image is not None:
+                self._tile_image.setVisible(self._tile_visible)
+            if self._tile_visible:
+                self._apply_data_time()  # keep the date in sync if driven by data
+                self.render_tiles()
             self._do_request_draw()
         except Exception as e:
-            warnings.warn(f"Failed to change tile source to {source_name}: {e}")
+            warnings.warn(f"Failed to set tile layers: {e}")
+
+    def set_tile_time(self, date) -> None:
+        """Set the acquisition date for time-dependent tile layers (None = latest)."""
+        if self._tile_builder is None:
+            return
+        self._tile_builder.set_time(date)
+        self._tile_cache_key = None
+        if self._tile_visible:
+            self.render_tiles()
+            self._do_request_draw()
+
+    def set_tile_time_from_data(self, enabled: bool) -> None:
+        """When enabled, drive the tile date from the displayed ping/survey time."""
+        self._tile_time_from_data = bool(enabled)
+        if enabled:
+            self._apply_data_time()
+
+    def _apply_data_time(self) -> None:
+        """Set the tile date from the current ping time (daily tiles: only on date change)."""
+        if not self._tile_time_from_data or self._tile_builder is None:
+            return
+        if self._current_ping_time is None:
+            return
+        import datetime
+        date = datetime.datetime.fromtimestamp(
+            float(self._current_ping_time), datetime.timezone.utc
+        ).strftime("%Y-%m-%d")
+        if date != self._tile_builder.get_time():
+            self._tile_builder.set_time(date)
+            self._tile_cache_key = None
+            if self._tile_visible:
+                self.render_tiles()
+
+    def is_tile_time_dependent(self) -> bool:
+        """Whether any active tile layer depends on an acquisition date."""
+        return bool(self._tile_builder is not None and self._tile_builder.is_time_dependent())
+
+    def export_tiles(self, path: str, scale: float = 2.0, max_pixels: int = 8000) -> Optional[str]:
+        """Save the current tile view as a georeferenced GeoTIFF (higher-res re-fetch)."""
+        if self._tile_builder is None or self._current_bounds is None:
+            return None
+        bounds = self._current_bounds
+        if not hasattr(bounds, 'xmin'):
+            from themachinethatgoesping.pingprocessing.overview.map_builder.coordinate_system import BoundingBox
+            bounds = BoundingBox(xmin=bounds[0], ymin=bounds[1], xmax=bounds[2], ymax=bounds[3])
+        try:
+            rect = self._plot.getViewBox().screenGeometry()
+            width, height = rect.width(), rect.height()
+        except Exception:
+            width, height = 1200, 900
+        target = (
+            int(min(max_pixels, max(512, width * scale))),
+            int(min(max_pixels, max(512, height * scale))),
+        )
+        try:
+            return self._tile_builder.export_geotiff(path, bounds, target_size=target)
+        except Exception as e:
+            warnings.warn(f"Tile export failed: {e}")
+            return None
 
     def list_tile_sources(self) -> List[str]:
         from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
         return list(TILE_SOURCES.keys())
+
+    def list_tile_overlays(self) -> List[str]:
+        from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import OVERLAY_SOURCES
+        return list(OVERLAY_SOURCES.keys())
 
     # =====================================================================
     # Rendering
@@ -1882,6 +1967,9 @@ class MapCore:
                 ping = slot.get_ping()
                 if ping is not None:
                     try:
+                        if hasattr(ping, 'get_timestamp'):
+                            self._current_ping_time = float(ping.get_timestamp())
+                            self._apply_data_time()
                         if hasattr(ping, 'get_geolocation'):
                             geo = ping.get_geolocation()
                             if hasattr(geo, 'latitude') and hasattr(geo, 'longitude'):

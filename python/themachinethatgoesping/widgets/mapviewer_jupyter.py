@@ -141,6 +141,7 @@ class MapViewerJupyter:
         # Build tile controls
         self._tile_source_dropdown = None
         self._tile_visibility_checkbox = None
+        self._tile_controls_box = None
         self._build_tile_controls()
 
         # Track legend
@@ -243,39 +244,68 @@ class MapViewerJupyter:
             self.core._active_colorbar_layer = layer_names[0]
 
     def _build_tile_controls(self) -> None:
-        """Build tile source controls if TileBuilder is available."""
+        """Build tile controls (base + overlay + date + download) if a TileBuilder is available."""
         if self.core._tile_builder is None:
             return
 
-        from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
+        import datetime
+        from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import (
+            TILE_SOURCES, OVERLAY_SOURCES)
 
         self._tile_visibility_checkbox = ipywidgets.Checkbox(
-            value=self.core.tile_visible,
-            description="Show background tiles",
-            indent=False,
-        )
+            value=self.core.tile_visible, description="Show tiles", indent=False)
         self._tile_visibility_checkbox.observe(
-            lambda change: self._on_tile_visibility_change(change['new']),
-            names='value',
-        )
+            lambda change: self._on_tile_visibility_change(change['new']), names='value')
 
-        tile_source_options = ['None'] + list(TILE_SOURCES.keys())
-        current_source = getattr(self.core._tile_builder, '_current_source_name', None)
-        default_source = (
-            current_source if current_source in tile_source_options
-            else tile_source_options[1] if len(tile_source_options) > 1
-            else 'None'
-        )
+        source_options = ['None'] + list(TILE_SOURCES.keys())
+        base = getattr(self.core._tile_builder, 'active_source_name', None)
         self._tile_source_dropdown = ipywidgets.Dropdown(
-            options=tile_source_options,
-            value=default_source,
-            description='Tiles:',
-            layout=ipywidgets.Layout(width='200px'),
-        )
+            options=source_options,
+            value=base if base in source_options else 'None',
+            description='Base:', layout=ipywidgets.Layout(width='230px'))
         self._tile_source_dropdown.observe(
-            lambda change: self._on_tile_source_change(change['new']),
-            names='value',
-        )
+            lambda change: self._on_tile_source_change(change['new']), names='value')
+
+        self._tile_overlay_dropdown = ipywidgets.Dropdown(
+            options=['None'] + list(OVERLAY_SOURCES.keys()), value='None',
+            description='Overlay:', layout=ipywidgets.Layout(width='230px'))
+        self._tile_overlay_dropdown.observe(
+            lambda change: self._on_tile_overlay_change(change['new']), names='value')
+
+        self._tile_date_picker = ipywidgets.DatePicker(
+            description='Date:', value=datetime.date.today())
+        self._tile_date_picker.observe(
+            lambda change: self._on_tile_date_change(change['new']), names='value')
+        self._tile_date_prev_btn = ipywidgets.Button(
+            description='◀', layout=ipywidgets.Layout(width='36px'), tooltip='Previous day')
+        self._tile_date_prev_btn.on_click(lambda b: self._step_tile_date(-1))
+        self._tile_date_next_btn = ipywidgets.Button(
+            description='▶', layout=ipywidgets.Layout(width='36px'), tooltip='Next day')
+        self._tile_date_next_btn.on_click(lambda b: self._step_tile_date(1))
+
+        self._tile_time_from_data_checkbox = ipywidgets.Checkbox(
+            value=False, description="Date from data", indent=False)
+        self._tile_time_from_data_checkbox.observe(
+            lambda change: self._on_tile_time_from_data_change(change['new']), names='value')
+
+        self._tile_download_name = ipywidgets.Text(
+            value='map_tiles.tif', description='File:', layout=ipywidgets.Layout(width='260px'))
+        self._tile_download_button = ipywidgets.Button(
+            description='Save GeoTIFF', icon='download',
+            tooltip='Save the current view as a georeferenced GeoTIFF (higher-resolution re-fetch)')
+        self._tile_download_button.on_click(lambda b: self._on_tile_download())
+        self._tile_download_status = ipywidgets.HTML("")
+
+        self._tile_controls_box = ipywidgets.VBox([
+            ipywidgets.HTML("<b>Background Tiles</b>"),
+            self._tile_visibility_checkbox,
+            ipywidgets.HBox([self._tile_source_dropdown, self._tile_overlay_dropdown]),
+            ipywidgets.HBox([self._tile_date_picker, self._tile_date_prev_btn,
+                             self._tile_date_next_btn, self._tile_time_from_data_checkbox]),
+            ipywidgets.HBox([self._tile_download_name, self._tile_download_button,
+                             self._tile_download_status]),
+        ], layout=ipywidgets.Layout(width="100%"))
+        self._update_tile_time_enabled()
 
     def _rebuild_layer_controls(self) -> None:
         """Rebuild layer controls after adding layers."""
@@ -319,6 +349,45 @@ class MapViewerJupyter:
         self.core.change_tile_source(source_name)
         if self._tile_visibility_checkbox is not None and source_name != 'None':
             self._tile_visibility_checkbox.value = True
+        self._update_tile_time_enabled()
+
+    def _on_tile_overlay_change(self, source_name: str) -> None:
+        self.core.change_tile_overlay(source_name)
+        self._update_tile_time_enabled()
+
+    def _on_tile_date_change(self, date) -> None:
+        if date is not None:
+            self.core.set_tile_time(date)
+
+    def _step_tile_date(self, days: int) -> None:
+        import datetime
+        current = self._tile_date_picker.value or datetime.date.today()
+        self._tile_date_picker.value = current + datetime.timedelta(days=days)
+
+    def _on_tile_time_from_data_change(self, enabled: bool) -> None:
+        self.core.set_tile_time_from_data(enabled)
+        self._update_tile_time_enabled()
+
+    def _on_tile_download(self) -> None:
+        import os
+        path = (self._tile_download_name.value or "map_tiles.tif").strip()
+        out = self.core.export_tiles(path)
+        if out:
+            self._tile_download_status.value = (
+                f"<span style='color:green'>Saved: {os.path.abspath(out)}</span>")
+        else:
+            self._tile_download_status.value = (
+                "<span style='color:red'>No tiles to export.</span>")
+
+    def _update_tile_time_enabled(self) -> None:
+        """Enable the date controls only for time-dependent layers (and not when data-driven)."""
+        if getattr(self, '_tile_date_picker', None) is None:
+            return
+        time_dependent = self.core.is_tile_time_dependent()
+        from_data = self._tile_time_from_data_checkbox.value
+        self._tile_time_from_data_checkbox.disabled = not time_dependent
+        for widget in (self._tile_date_picker, self._tile_date_prev_btn, self._tile_date_next_btn):
+            widget.disabled = (not time_dependent) or from_data
 
     # =====================================================================
     # Auto-update
@@ -587,11 +656,8 @@ class MapViewerJupyter:
         parts: list = []
 
         # Tile controls
-        if self._tile_source_dropdown is not None:
-            parts.append(ipywidgets.HTML("<b>Background Tiles</b>"))
-            parts.append(ipywidgets.HBox([
-                self._tile_visibility_checkbox, self._tile_source_dropdown
-            ]))
+        if self._tile_controls_box is not None:
+            parts.append(self._tile_controls_box)
 
         # Layer controls
         if self.core._builder is not None:
@@ -646,11 +712,8 @@ class MapViewerJupyter:
         controls_list = []
 
         # Tile controls
-        if self._tile_source_dropdown is not None:
-            controls_list.append(ipywidgets.HTML("<b>Background Tiles</b>"))
-            controls_list.append(ipywidgets.HBox([
-                self._tile_visibility_checkbox, self._tile_source_dropdown
-            ]))
+        if self._tile_controls_box is not None:
+            controls_list.append(self._tile_controls_box)
 
         # Layer controls
         if layer_widgets:

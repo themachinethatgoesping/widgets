@@ -108,6 +108,10 @@ class MapViewerQt(QtWidgets.QMainWindow):
             max_render_size=max_render_size,
         )
 
+        # The core always provides a tile builder (auto-created if none was passed) so the
+        # tile-source control is available; use it for all tile controls below.
+        tile_builder = self.core._tile_builder
+
         # Wire adapter callbacks into the core
         self.core._schedule_update = self._schedule_debounced_update
         self.core._request_draw = lambda: None  # native Qt repaints automatically
@@ -137,6 +141,13 @@ class MapViewerQt(QtWidgets.QMainWindow):
         # Init layer/tile control widget dicts (populated by _build_layer_tile_controls)
         self._tile_source_combo: Optional[QtWidgets.QComboBox] = None
         self._tile_visible_cb: Optional[QtWidgets.QCheckBox] = None
+        self._tile_overlay_combo: Optional[QtWidgets.QComboBox] = None
+        self._tile_date_edit = None
+        self._tile_date_prev_btn = None
+        self._tile_date_next_btn = None
+        self._tile_time_from_data_cb = None
+        self._tile_download_btn = None
+        self._tile_controls_widget: Optional[QtWidgets.QWidget] = None
         self._layer_checkboxes_qt: Dict[str, QtWidgets.QCheckBox] = {}
         self._layer_sliders_qt: Dict[str, QtWidgets.QSlider] = {}
         self._layer_colormap_combos: Dict[str, QtWidgets.QComboBox] = {}
@@ -362,30 +373,101 @@ class MapViewerQt(QtWidgets.QMainWindow):
     def _build_layer_tile_controls(self, builder, tile_builder) -> None:
         """Create layer and tile control widgets (stored as instance attrs)."""
         if tile_builder is not None:
-            try:
-                from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import TILE_SOURCES
-            except Exception:
-                TILE_SOURCES = {}
-
-            self._tile_visible_cb = QtWidgets.QCheckBox("Show background tiles")
-            self._tile_visible_cb.setChecked(self.core.tile_visible)
-            self._tile_visible_cb.toggled.connect(self._on_tile_visibility_qt)
-
-            self._tile_source_combo = QtWidgets.QComboBox()
-            self._tile_source_combo.addItem("None")
-            for src in TILE_SOURCES.keys():
-                self._tile_source_combo.addItem(src)
-            current_source = getattr(tile_builder, '_current_source_name', None)
-            if current_source:
-                idx = self._tile_source_combo.findText(current_source)
-                if idx >= 0:
-                    self._tile_source_combo.setCurrentIndex(idx)
-            self._tile_source_combo.currentTextChanged.connect(self._on_tile_source_qt)
+            self._build_tile_controls_qt()
 
         if builder is not None:
             for layer in builder.layers:
                 self._add_layer_row_qt(layer.name)
             self._refresh_colorbar_dropdown_qt()
+
+    def _build_tile_controls_qt(self) -> None:
+        """Build the background-tile controls (base + overlay + date + download)."""
+        try:
+            from themachinethatgoesping.pingprocessing.overview.map_builder.tile_builder import (
+                TILE_SOURCES, OVERLAY_SOURCES)
+        except Exception:
+            TILE_SOURCES, OVERLAY_SOURCES = {}, {}
+
+        tb = self.core._tile_builder
+
+        self._tile_visible_cb = QtWidgets.QCheckBox("Show tiles")
+        self._tile_visible_cb.setChecked(self.core.tile_visible)
+        self._tile_visible_cb.toggled.connect(self._on_tile_visibility_qt)
+
+        self._tile_source_combo = QtWidgets.QComboBox()
+        self._tile_source_combo.addItem("None")
+        for src in TILE_SOURCES:
+            self._tile_source_combo.addItem(src)
+        base = getattr(tb, 'active_source_name', None)
+        if base:
+            idx = self._tile_source_combo.findText(base)
+            if idx >= 0:
+                self._tile_source_combo.setCurrentIndex(idx)
+        self._tile_source_combo.currentTextChanged.connect(self._on_tile_source_qt)
+
+        self._tile_overlay_combo = QtWidgets.QComboBox()
+        self._tile_overlay_combo.addItem("None")
+        for ov in OVERLAY_SOURCES:
+            self._tile_overlay_combo.addItem(ov)
+        self._tile_overlay_combo.currentTextChanged.connect(self._on_tile_overlay_qt)
+
+        self._tile_date_edit = QtWidgets.QDateEdit()
+        self._tile_date_edit.setCalendarPopup(True)
+        self._tile_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self._tile_date_edit.setDate(QtCore.QDate.currentDate())
+        self._tile_date_edit.dateChanged.connect(self._on_tile_date_qt)
+
+        self._tile_date_prev_btn = QtWidgets.QPushButton("◀")
+        self._tile_date_prev_btn.setFixedWidth(28)
+        self._tile_date_prev_btn.setToolTip("Previous day")
+        self._tile_date_prev_btn.clicked.connect(lambda: self._step_tile_date_qt(-1))
+        self._tile_date_next_btn = QtWidgets.QPushButton("▶")
+        self._tile_date_next_btn.setFixedWidth(28)
+        self._tile_date_next_btn.setToolTip("Next day")
+        self._tile_date_next_btn.clicked.connect(lambda: self._step_tile_date_qt(1))
+
+        self._tile_time_from_data_cb = QtWidgets.QCheckBox("Date from data")
+        self._tile_time_from_data_cb.setToolTip(
+            "Use the displayed survey / ping date for time-dependent layers")
+        self._tile_time_from_data_cb.toggled.connect(self._on_tile_time_from_data_qt)
+
+        self._tile_download_btn = QtWidgets.QPushButton("Save GeoTIFF…")
+        self._tile_download_btn.setToolTip(
+            "Save the current view as a georeferenced GeoTIFF (higher-resolution re-fetch)")
+        self._tile_download_btn.clicked.connect(self._on_tile_download_qt)
+
+        container = QtWidgets.QWidget()
+        vlayout = QtWidgets.QVBoxLayout(container)
+        vlayout.setContentsMargins(0, 0, 0, 0)
+        row1 = QtWidgets.QHBoxLayout()
+        row1.addWidget(self._tile_visible_cb)
+        row1.addWidget(QtWidgets.QLabel("Base:"))
+        row1.addWidget(self._tile_source_combo)
+        row1.addWidget(QtWidgets.QLabel("+"))
+        row1.addWidget(self._tile_overlay_combo)
+        row1.addStretch()
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("Date:"))
+        row2.addWidget(self._tile_date_edit)
+        row2.addWidget(self._tile_date_prev_btn)
+        row2.addWidget(self._tile_date_next_btn)
+        row2.addWidget(self._tile_time_from_data_cb)
+        row2.addStretch()
+        row2.addWidget(self._tile_download_btn)
+        vlayout.addLayout(row1)
+        vlayout.addLayout(row2)
+        self._tile_controls_widget = container
+        self._update_tile_time_enabled_qt()
+
+    def _update_tile_time_enabled_qt(self) -> None:
+        """Enable the date controls only for time-dependent layers (and not when data-driven)."""
+        if self._tile_date_edit is None:
+            return
+        time_dependent = self.core.is_tile_time_dependent()
+        from_data = self._tile_time_from_data_cb.isChecked()
+        self._tile_time_from_data_cb.setEnabled(time_dependent)
+        for widget in (self._tile_date_edit, self._tile_date_prev_btn, self._tile_date_next_btn):
+            widget.setEnabled(time_dependent and not from_data)
 
     def _add_layer_row_qt(self, layer_name: str) -> QtWidgets.QWidget:
         """Create the control row (visibility, opacity, colormap, min/max) for a layer."""
@@ -565,12 +647,8 @@ class MapViewerQt(QtWidgets.QMainWindow):
         layers_vlayout = QtWidgets.QVBoxLayout(layers_widget)
         layers_vlayout.setContentsMargins(4, 4, 4, 4)
 
-        if self._tile_visible_cb is not None:
-            tile_row = QtWidgets.QHBoxLayout()
-            tile_row.addWidget(self._tile_visible_cb)
-            tile_row.addWidget(self._tile_source_combo)
-            tile_row.addStretch()
-            layers_vlayout.addLayout(tile_row)
+        if self._tile_controls_widget is not None:
+            layers_vlayout.addWidget(self._tile_controls_widget)
 
         self._layers_rows_layout = layers_vlayout
         for layer_name in list(self._layer_rows_qt.keys()):
@@ -659,12 +737,8 @@ class MapViewerQt(QtWidgets.QMainWindow):
         layout.addLayout(measure_row)
 
         # Tile controls
-        if self._tile_visible_cb is not None:
-            tile_row = QtWidgets.QHBoxLayout()
-            tile_row.addWidget(self._tile_visible_cb)
-            tile_row.addWidget(self._tile_source_combo)
-            tile_row.addStretch()
-            layout.addLayout(tile_row)
+        if self._tile_controls_widget is not None:
+            layout.addWidget(self._tile_controls_widget)
 
         # Layer controls
         self._ensure_layer_rows_qt()
@@ -693,6 +767,33 @@ class MapViewerQt(QtWidgets.QMainWindow):
         self.core.change_tile_source(source_name)
         if self._tile_visible_cb is not None and source_name != 'None':
             self._tile_visible_cb.setChecked(True)
+        self._update_tile_time_enabled_qt()
+
+    def _on_tile_overlay_qt(self, source_name: str) -> None:
+        self.core.change_tile_overlay(source_name)
+        self._update_tile_time_enabled_qt()
+
+    def _on_tile_date_qt(self, qdate) -> None:
+        self.core.set_tile_time(qdate.toString("yyyy-MM-dd"))
+
+    def _step_tile_date_qt(self, days: int) -> None:
+        self._tile_date_edit.setDate(self._tile_date_edit.date().addDays(days))
+
+    def _on_tile_time_from_data_qt(self, checked: bool) -> None:
+        self.core.set_tile_time_from_data(checked)
+        self._update_tile_time_enabled_qt()
+
+    def _on_tile_download_qt(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save map tiles as GeoTIFF", "map_tiles.tif", "GeoTIFF (*.tif *.tiff)")
+        if not path:
+            return
+        out = self.core.export_tiles(path)
+        if out:
+            print(f"Saved GeoTIFF: {out}")
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Export failed", "No tiles to export (select a source and view an area).")
 
     # =====================================================================
     # Track legend (Qt)
