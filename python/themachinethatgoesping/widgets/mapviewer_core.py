@@ -158,6 +158,13 @@ class MapCore:
         "#00FFFF", "#FFFF00", "#FF8000", "#8000FF",
     ]
 
+    # Z-order bands (higher = drawn on top). Data rasters render just above
+    # the tiles but below the ping marker; the ping marker stays below the
+    # track lines (which use the default z-value of 0).
+    _Z_TILE = -100
+    _Z_LAYER_BASE = -90
+    _Z_PING_MARKER = -10
+
     def __init__(
         self,
         builder: Any = None,
@@ -754,7 +761,7 @@ class MapCore:
             if self._tile_image is None:
                 self._tile_image = pg.ImageItem(axisOrder="row-major")
                 self._plot.addItem(self._tile_image)
-                self._tile_image.setZValue(-100)
+                self._tile_image.setZValue(self._Z_TILE)
 
             flipped = tile_image[::-1]
             self._tile_image.setImage(flipped, autoLevels=False)
@@ -829,7 +836,7 @@ class MapCore:
             bounds.xmin, bounds.ymin,
             bounds.width, bounds.height,
         ))
-        img.setZValue(layer.z_order)
+        img.setZValue(self._Z_LAYER_BASE + layer.z_order)
         img.setVisible(layer.visible)
 
     def set_layer_visibility(self, layer_name: str, visible: bool) -> None:
@@ -1383,6 +1390,7 @@ class MapCore:
                 pen=pg.mkPen('#000000', width=2),
                 symbol='o',
             )
+            self._ping_marker.setZValue(self._Z_PING_MARKER)
             self._plot.addItem(self._ping_marker)
         else:
             self._ping_marker.setData([x], [y])
@@ -2029,7 +2037,11 @@ class MapCore:
                     lats = []
                     lons = []
                     for ping in pings:
-                        if hasattr(ping, 'get_geolocation'):
+                        # Grouped/dual-head pings are stored as a
+                        # dict {channel_id: ping}; use any member.
+                        if isinstance(ping, dict):
+                            ping = next(iter(ping.values()), None)
+                        if ping is not None and hasattr(ping, 'get_geolocation'):
                             geo = ping.get_geolocation()
                             if hasattr(geo, 'latitude') and hasattr(geo, 'longitude'):
                                 lats.append(geo.latitude)
