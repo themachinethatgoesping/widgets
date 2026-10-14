@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from IPython.display import display
 
 from themachinethatgoesping import echosounders
+from themachinethatgoesping import pingprocessing
 
 import themachinethatgoesping.pingprocessing.watercolumn.image as mi
 import themachinethatgoesping.pingprocessing.watercolumn.helper.make_image_helper as mi_hlp
@@ -293,7 +294,7 @@ class WCIViewer:
             self.update_view(w)
             t2 = time()
             ping = self.imagebuilder.pings[self.w_index.value]
-            if not isinstance(ping, echosounders.filetemplates.I_Ping):
+            if not isinstance(ping, pingprocessing.datatypes.I_Ping):
                 ping = next(iter(ping.values()))
 
             self.w_date.value = ping.get_datetime().strftime("%Y-%m-%d")
