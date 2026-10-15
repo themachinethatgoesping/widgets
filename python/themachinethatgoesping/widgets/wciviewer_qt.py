@@ -553,6 +553,36 @@ class WCIViewerQt(QtWidgets.QMainWindow):
         if app is not None:
             app.exec()
 
+    def cleanup(self) -> None:
+        """Stop all background activity owned by this viewer.
+
+        Invoked on window close (and by the combined viewer) so that an active
+        playback / capture does not keep running after the GUI is gone.
+        """
+        try:
+            self._stop_play_qt()
+        except Exception:
+            pass
+        try:
+            self.core.stop_autoplay()
+        except Exception:
+            pass
+        if getattr(self.core, "_continuous_capture_active", False):
+            try:
+                self.core._stop_and_save_continuous_capture()
+            except Exception:
+                pass
+
+    def closeEvent(self, event) -> None:
+        self.cleanup()
+        super().closeEvent(event)
+
+    def __del__(self) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            pass
+
     def register_ping_change_callback(self, callback: Any) -> None:
         self.core.register_ping_change_callback(callback)
 

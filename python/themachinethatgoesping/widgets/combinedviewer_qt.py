@@ -317,7 +317,19 @@ class CombinedViewerQt(QtWidgets.QMainWindow):
         self._restore_dock_state()
 
     def closeEvent(self, event) -> None:
-        """Auto-save window geometry and dock arrangement on close."""
+        """Stop hosted viewers' background activity and save state on close."""
+        # Closing the combined window must end every running process it hosts
+        # (e.g. an active WCI playback, echogram/map background loaders and
+        # view-range timers); the embedded viewers are never shown as their own
+        # windows, so their own closeEvent would otherwise never fire.
+        for entry in self._core.entries:
+            viewer = getattr(entry, "viewer", None)
+            cleanup = getattr(viewer, "cleanup", None)
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
         self._save_state()
         super().closeEvent(event)
 
