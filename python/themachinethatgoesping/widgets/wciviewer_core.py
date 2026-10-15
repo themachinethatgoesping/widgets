@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time as time_module
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -314,6 +315,8 @@ class WCICore:
         self._ignore_range_changes = False
         self._first_draw = True
         self._updating_ref_time = False
+        # Last surfaced image-build error message (deduplicates repeated warnings).
+        self._last_build_error: Optional[str] = None
 
         self._autoplay_active = False
         self._autoplay_task: Optional[Any] = None
@@ -762,6 +765,23 @@ class WCICore:
         t2 = time_module.time()
         self._update_timing_fields(t0, t1, t2)
 
+    def _report_build_error(self, exc: Exception) -> None:
+        """Surface an image-build error instead of silently swallowing it.
+
+        Always updates the progress label (visible in the GUI) and emits a Python
+        warning once per distinct message, so a repeatedly-failing build is
+        reported rather than looking like a frozen viewer that keeps advancing the
+        ping index without updating the image.
+        """
+        msg = str(exc)
+        try:
+            self.progress.set_description(f"Error: {msg}")
+        except Exception:
+            pass
+        if msg != self._last_build_error:
+            self._last_build_error = msg
+            warnings.warn(f"WCI image build failed: {msg}", stacklevel=2)
+
     def _update_slot(self, slot: WCISlot, fast_mode: bool = False) -> None:
         if slot.imagebuilder is None or slot.plot_item is None:
             return
@@ -773,7 +793,8 @@ class WCICore:
                     stack=int(self.panel["stack"].value),
                     stack_step=int(self.panel["stack_step"].value),
                 )
-            except Exception:
+            except Exception as e:
+                self._report_build_error(e)
                 return
             self._update_slot_image(slot)
             return
@@ -789,7 +810,7 @@ class WCICore:
                 stack_step=int(self.panel["stack_step"].value),
             )
         except Exception as e:
-            self.progress.set_description(f"Error: {e}")
+            self._report_build_error(e)
             return
         self.progress.set_description("Idle")
         self._update_slot_image(slot)
