@@ -49,7 +49,7 @@ class WCIViewer:
             "from_bottom_xyz": False,
             "wci_value": "sv/av/pv/rv",
             "wci_render": "linear",
-            "ping_sample_selector": echosounders.pingtools.PingSampleSelector(),
+            "ping_sample_selector": pingprocessing.pingtools.PingSampleSelector(),
             "apply_pss_to_bottom": False,
             "mp_cores": 1,
         }
